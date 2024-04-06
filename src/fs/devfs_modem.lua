@@ -1,5 +1,5 @@
 --[[
-  Template kernel source file
+  Modem component support through the devfs.
   Copyright (C) 2024 ULOS Developers
 
   This program is free software: you can redistribute it and/or modify

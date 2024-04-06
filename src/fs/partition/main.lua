@@ -1,6 +1,6 @@
 --[[
   Support various partitioning schemes
-  Copyright (C) 2023 Ocawesome101
+  Copyright (C) 2023 ULOS Developers
 
   This program is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by

@@ -1,6 +1,6 @@
 --[[
     Main kernel source file
-    Copyright (C) 2022 Ocawesome101
+    Copyright (C) 2022 ULOS Developers
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -27,8 +27,8 @@ local k = {}
 --#include "src/signals.lua"
 --#include "src/shutdown.lua"
 --#include "src/scheduler/main.lua"
---#include "src/fs/main.lua"
 --#include "src/components/main.lua"
+--#include "src/fs/main.lua"
 --@[{includeif("NET_ENABLE", "src/net/main.lua")}]
 --#include "src/tty.lua"
 --#include "src/ttyprintk.lua"
