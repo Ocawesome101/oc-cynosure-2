@@ -294,6 +294,7 @@ do
   end
 
   function discipline:flush()
+    if #self.wbuf == 0 then return end
     local data = self.wbuf
     self.wbuf = ""
     self.obj:write(data)

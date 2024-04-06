@@ -30,7 +30,7 @@ local k = {}
 --#include "src/fs/main.lua"
 --#include "src/components/main.lua"
 --@[{includeif("NET_ENABLE", "src/net/main.lua")}]
---#include "src/tty.lua"
+--#include "src/tty2.lua"
 --#include "src/ttyprintk.lua"
 --#include "src/user/sandbox.lua"
 --#include "src/exec/main.lua"
