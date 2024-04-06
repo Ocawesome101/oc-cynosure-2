@@ -1,5 +1,5 @@
 --[[
-    Cynosure 2.0's improved VT100 emulator.  Compatible with Cynosure 1's.
+    Second vt100 implementation.  Should be fairly compatible with console_codes(5).
     Copyright (C) 2022 Ocawesome101
 
     This program is free software: you can redistribute it and/or modify
@@ -19,10 +19,61 @@
 printk(k.L_INFO, "tty")
 
 do
-  local _tty = {}
+  -- control characters
+  local NUL = '\x00'
+  local BEL = '\x07'
+  local BS  = '\x08'
+  local HT  = '\x09'
+  local LF  = '\x0a'
+  local VT  = '\x0b'
+  local FF  = '\x0c'
+  local CR  = '\x0d'
+  -- UNSUPPORTED: SO, SI
+  local SO  = '\x0e'
+  local SI  = '\x0f'
+  local CAN = '\x18'
+  local SUB = '\x1a'
+  local ESC = '\x1b'
+  -- ignored apparently
+  local DEL = '\x7f'
+  -- equivalent to esc [
+  local CSI = '\x9B'
+
+  local MODE_NORMAL = 0
+  local MODE_ESC = 1
+  local MODE_CSI = 2
+  local MODE_DSAT = 3
+  local MODE_CHARSET = 4
+  local MODE_G0 = 5
+  local MODE_G1 = 6
+  local MODE_OSC = 7
+
+  local control_chars = {
+    [NUL] = true,
+    [BEL] = true,
+    [BS] = true,
+    [HT] = true,
+    [LF] = true,
+    [VT] = true,
+    [FF] = true,
+    [CR] = true,
+    [SO] = true,
+    [SI] = true,
+    [CAN] = true,
+    [SUB] = true,
+    [ESC] = true,
+    [DEL] = true,
+    [CSI] = true,
+  }
+
+  local scancode_lookups = {
+    [200] = "A",
+    [208] = "B",
+    [205] = "C",
+    [203] = "D"
+  }
 
   local colors = {
-    -- normal colors
     0x000000,
     0xaa0000,
     0x00aa00,
@@ -31,7 +82,7 @@ do
     0xaa00aa,
     0x00aaaa,
     0xaaaaaa,
-    -- bright colors
+    -- bright
     0x555555,
     0xff5555,
     0x55ff55,
@@ -42,643 +93,441 @@ do
     0xffffff
   }
 
-  -- i've implemented most of what console_codes(4) specifies
-  local nocsi = {}
-  local commands = {}
-  local controllers = {}
+  -- use string.gmatch for parsing smaller than this, string.sub for everything longer or equal
+  -- in normal Lua gmatch is twice as fast for everything, but OpenComputers reimplements the
+  -- pattern-matching functions in Lua, which is approximately 100x slower.
+  -- on my machine lua5.4 gmatch takes 4.5 seconds to process 128MB of data;
+  -- OpenComputers gmatch takes nearly 10 minutes.
+  -- string.sub takes roughly 8 seconds on lua5.4 and 12 on OpenComputers.
+  local MAX_GMATCH = 500
 
-  local function scroll(self, n)
-    local top, bot = self.scrolltop, self.scrollbot
-    local height = bot - top + 1
-    self.gpu.copy(1, top, self.w, height, 0, -n)
-
-    if n < 0 then n = self.h + n end
-    self.gpu.fill(1, bot - n + 1, self.w, n, " ")
-  end
-
-  -- RIS - reset
-  function nocsi:c()
-    self.fg = 7
-    self.bg = 0
-    self.fgpal = true
-    self.bgpal = true
-    self.gpu.setForeground(7, true)
-    self.gpu.setBackground(0, true)
-    self.gpu.fill(1, 1, self.w, self.h, " ")
-    self.cx, self.cy = 1, 1
-  end
-
-  -- IND - linefeed
-  function nocsi:D()
-    self.cy = self.cy + 1
-  end
-
-  -- NEL - newline
-  function nocsi:E()
-    self.cx, self.cy = 1, self.cy + 1
-  end
-
-  -- HTS not implemented
-  -- RI - reverse linefeed
-  function nocsi:M()
-    self.cy = self.cy - 1
-  end
-
-  -- DECID: returns ESC [ ? 6 c, for VT102
-  function nocsi:Z()
-    if self.discipline then
-      self.discipline:processInput("\27[?6c")
-    end
-  end
-
-  local save = {"fg", "bg", "fgpal", "bgpal", "echo", "cx", "cy"}
-  -- DECSC - save state
-  nocsi["7"] = function(self)
-    self.saved = {}
-
-    for i=1, #save, 1 do
-      self.saved[save[i]] = self[save[i]]
-    end
-  end
-
-  -- DECRC - restore state from DECSC
-  nocsi["8"] = function(self)
-    if self.saved then
-      for i=1, #save, 1 do
-        self[save[i]] = self.saved[save[i]]
-      end
-
-      self.gpu.setForeground(self.fg, self.fgpal)
-      self.gpu.setBackground(self.bg, self.bgpal)
-    end
-  end
-
-  -- ESC % not implemented; OC doesn't have a way to switch character sets
-  -- ESC # 8 implemented in write logic below
-  -- ESC ( and ESC ) not implemented for the same reason as ESC %
-  -- ESC > and ESC = not implemented
-
-  -- CSI @ is not implemented
-
-  -- CUU - cursor up
-  function commands:A(args)
-    local n = args[1] or 1
-    self.cy = self.cy - n
-  end
-
-  -- CUD - cursor left
-  function commands:B(args)
-    local n = args[1] or 1
-    self.cy = self.cy + n
-  end
-
-  -- CUF - cursor "forward" (right)
-  function commands:C(args)
-    local n = args[1] or 1
-    self.cx = self.cx + n
-  end
-
-  -- CUB - cursor "backward" (left)
-  function commands:D(args)
-    local n = args[1] or 1
-    self.cx = self.cx - n
-  end
-
-  -- CNL - cursor down # rows, to column 1
-  function commands:E(args)
-    local n = args[1] or 1
-    self.cx, self.cy = 1, self.cy + n
-  end
-
-  -- CPL - cursor up # rows, to column 1
-  function commands:F(args)
-    local n = args[1] or 1
-    self.cx, self.cy = 1, self.cy - n
-  end
-
-  -- CHA - cursor to indicated column
-  function commands:G(args)
-    local n = args[1] or 1
-    self.cx = math.max(1, math.min(self.w, n))
-  end
-
-  -- CUP - set cursor position to row;column
-  function commands:H(args)
-    local row, col = args[1] or 1, args[2] or 1
-    self.cx = math.max(1, math.min(self.w, col))
-    self.cy = math.max(1, math.min(self.h, row))
-  end
-
-  -- ED - erase display
-  function commands:J(args)
-    local n = args[1] or 0
-    if n == 0 then
-      self.gpu.fill(self.cx, self.cy, self.w - self.cx, 1, " ")
-      self.gpu.fill(1, self.cy + 1, self.w, self.h - self.cy - 1, " ")
-
-    elseif n == 1 then
-      self.gpu.fill(1, self.cx, self.w, self.cy, " ")
-
-    elseif n == 2 then
-      self.gpu.fill(1, 1, self.w, self.h, " ")
-    end
-  end
-
-  -- EL - erase line
-  function commands:K(args)
-    local n = args[1] or 0
-    if n == 0 then
-      self.gpu.fill(self.cx, self.cy, self.w - self.cx, 1, " ")
-
-    elseif n == 1 then
-      self.gpu.fill(1, self.cy, self.cx, 1, " ")
-
-    elseif n == 2 then
-      self.gpu.fill(1, self.cy, self.w, 1, " ")
-    end
-  end
-
-  -- IL - insert lines
-  function commands:L(args)
-    local n = args[1] or 1
-    -- copy everything from cy and lower down n
-    self.gpu.copy(1, self.cy, self.w, self.h - self.cy, 0, n)
-    self.gpu.fill(1, self.cy, self.w, n, " ")
-  end
-
-  -- DL - delete lines
-  function commands:M(args)
-    local n = args[1] or 1
-    -- copy everything from cy and lower up n
-    self.gpu.copy(1, self.cy, self.w, self.h - self.cy, 0, -n)
-    self.gpu.fill(1, self.h-n, self.w, n, " ")
-  end
-
-  -- DCH - delete characters
-  function commands:P(args)
-    local n = args[1] or 1
-    self.gpu.copy(self.cx + n, self.cy, self.w - self.cx, 1, -n, 0)
-    self.gpu.fill(self.w - n, self.cy, n, 1, " ")
-  end
-
-  -- not documented in console_codes(4), but expected by programs
-  -- so these names are made-up
-
-  -- SCD - scroll down
-  function commands:S(args)
-    local n = args[1] or 1
-    self.gpu.copy(1, n, self.w, self.h, 0, -n)
-    self.gpu.fill(1, self.h - n, self.w, n, " ")
-  end
-
-  -- SCU - scroll up
-  function commands:T(args)
-    local n = args[1] or 1
-    self.gpu.copy(1, 1, self.w, self.h-n, 0, n)
-    self.gpu.fill(1, 1, self.w, n, " ")
-  end
-
-  -- ECH - erase characters
-  function commands:X(args)
-    local n = args[1] or 1
-    self.gpu.fill(self.cx, self.cy, n, 1, " ")
-  end
-
-  -- HPR - move cursor right
-  function commands:a(args)
-    local n = args[1] or 1
-    self.cx = self.cx + n
-  end
-
-  -- DA - same as ESC Z
-  function commands:c()
-    if self.discipline then
-      self.discipline:processInput("\27[?6c")
-    end
-  end
-
-  -- VPA - move cursor to indicated row in current column
-  function commands:d(args)
-    local n = args[1] or 1
-    self.cy = math.max(1, math.min(self.h, n))
-  end
-
-  -- VPR - move cursor down
-  function commands:e(args)
-    local n = args[1] or 1
-    self.cy = self.cy + n
-  end
-
-  -- HVP - see commands.H
-  commands.f = commands.H
-
-  -- CSI g not implemented
-
-  local function hl(self, set, args)
-    for i=1, #args, 1 do
-      local n = args[i]
-
-      -- 1 - cursor keys send ESC O prefix rather than ESC [
-      if n == 1 then
-        self.altcursor = set
-
-      -- 9 - X10 mouse reporting
-      elseif n == 9 then
-        self.mousereport = set and 1 or 0
-
-      -- 20 - automatically add carriage return after line feed, vertical tab,
-      --      or form feed
-      elseif n == 20 then
-        self.autocr = set
-
-      -- 25 - make cursor visible
-      elseif n == 25 then
-        self.cursor = set
-
-      -- 1000 - X11 mouse reporting
-      elseif n == 1000 then
-        self.mousereport = set and 2 or 0
+  local gmatch, sub = string.gmatch, string.sub
+  local function get_iter(str)
+    if #str < MAX_GMATCH then
+      return gmatch(str, "()(.)")
+    else
+      local n, len = 0, #str
+      return function()
+        n = n + 1
+        if n < len then return n, sub(str, n, n) end
       end
     end
   end
-
-  -- SM - set mode
-  function commands:h(args)
-    hl(self, true, args)
-  end
-
-  -- RM - reset mode
-  function commands:l(args)
-    hl(self, false, args)
-  end
-
-  -- split into a separate function to avoid code duplication
-  local function processFancyColor(self, field, setter, args, i)
-    if i + 2 > #args then return math.huge end
-
-    i = i + 1
-    if args[i] == 2 then -- 24-bit color mode
-      if i + 3 > #args then return math.huge end
-
-      local r, g, b = args[i+1], args[i+2], args[i+3]
-      i = i + 3
-      local rgb = (r << 16) + (g << 8) + b
-
-      self[field] = rgb
-      setter(rgb)
-
-    elseif args[i] == 5 then
-      -- 256-color mode is not implemented
-    end
-
-    return i
-  end
-
-  -- SGR - set attributes
-  function commands:m(args)
-    args[1] = args[1] or 0
-    local i = 0
-    while i < #args do
-      i = i + 1
-
-      local n = args[i]
-      if n == 0 then
-        self.fg = 7
-        self.bg = 0
-        self.fgpal = true
-        self.bgpal = true
-        self.gpu.setForeground(self.fg, true)
-        self.gpu.setBackground(self.bg, true)
-        self.echo = true
-
-      -- bold mode (1) not implemented
-      -- half-bright (2) not implemented
-      -- underscore (4) not implemented
-      -- blink (5) not implemented
-      -- reverse video
-      elseif (n == 7 and not self.reversed) or (n == 27 and self.reversed) then
-        self.reversed = true
-        self.fg, self.bg = self.bg, self.fg
-        self.gpu.setForeground(self.fg, self.fgpal)
-        self.gpu.setBackground(self.bg, self.bgpal)
-
-      elseif n == 8 or n == 28 then
-        self.echo = n == 28
-
-      -- 10, 11, 12, 21, 22, 25 not implemented
-      elseif n > 29 and n < 38 then
-        self.fg = n - 30
-        self.fgpal = true
-        self.gpu.setForeground(self.fg, true)
-
-      elseif n > 89 and n < 98 then
-        self.fg = n - 82
-        self.fgpal = true
-        self.gpu.setForeground(self.fg, true)
-
-      elseif n > 39 and n < 48 then
-        self.bg = n - 40
-        self.bgpal = true
-        self.gpu.setBackground(self.bg, true)
-
-      elseif n > 99 and n < 108 then
-        self.bg = n - 92
-        self.bgpal = true
-        self.gpu.setBackground(self.bg, true)
-
-      elseif n == 38 then
-        self.fgpal = false
-        i = processFancyColor(self, "fg", self.gpu.setForeground, args, i)
-
-      elseif n == 48 then
-        self.bgpal = false
-        i = processFancyColor(self, "bg", self.gpu.setBackground, args, i)
-
-      elseif n == 39 then
-        self.fg = 7
-        self.fgpal = true
-        self.gpu.setForeground(self.fg, true)
-
-      elseif n == 49 then
-        self.bg = 0
-        self.bgpal = true
-        self.gpu.setBackground(self.bg, true)
-      end
-    end
-  end
-
-  -- DSR - status report
-  function commands:n(args)
-    local n = args[1] or 0
-
-    if self.discipline then
-      if n == 5 then
-        self.discipline:processInput("\27[0n")
-
-      elseif n == 6 then
-        self.discipline:processInput(string.format("\27[%d;%dR",
-          self.cy, self.cx))
-      end
-    end
-  end
-
-  -- CSI q not implemented; no keyboard LEDs
-
-  -- DECSTBM - set scrolling region
-  function commands:r(args)
-    local top, bot = args[1] or 1, args[2] or self.h
-    self.scrolltop = math.max(1, math.min(top, self.h))
-    self.scrollbot = math.min(self.h, math.max(1, bot))
-  end
-
-  -- save cursor location
-  function commands:s()
-    self.saved = self.saved or {}
-    self.saved.cx = self.cx
-    self.saved.cy = self.cy
-  end
-
-  -- restore cursor location
-  function commands:u()
-    if self.saved then
-      self.cx = self.saved.cx
-      self.cy = self.saved.cy
-    end
-  end
-
-  -- who thought having ` as a command was a good idea?
-  commands["`"] = function(self, args)
-    local n = args[1] or 1
-    self.cx = math.max(1, math.min(self.w, n))
-  end
-
---@[{includeif("TTY_ENABLE_GPU", "src/tty_gpu.lua")}]
-
-  -- cursor bounds checking
-  local function corral(self)
-    while self.cx < 1 do
-      self.cx = self.cx + self.w
-      self.cy = self.cy - 1
-    end
-
-    while self.cx > self.w do
-      self.cx = self.cx - self.w
-      self.cy = self.cy + 1
-    end
-
-    while self.cy < self.scrolltop do
-      scroll(self, -1)
-      self.cy = self.cy + 1
-    end
-
-    while self.cy > self.scrollbot do
-      scroll(self, 1)
-      self.cy = self.cy - 1
-    end
-  end
-
-  -- write some text
-  local function textwrite(self, line)
-    if not self.echo then line = (" "):rep(#line) end
-
-    while #line > 0 do
-      corral(self)
-      local chunk = line:sub(1, self.w - self.cx + 1)
-
-      line = line:sub(#chunk + 1)
-      self.gpu.set(self.cx, self.cy, chunk)
-      self.cx = self.cx + #chunk
-    end
-  end
-
-  local tab_width = tonumber(k.cmdline["tty.tab_width"]) or 8
-  local function writelines(self, chunk)
-    while #chunk > 0 do
-      local fnrtv = chunk:find("[\f\n\r\t\v]")
-
-      if fnrtv then
-        local ln = chunk:sub(1, fnrtv - 1)
-        local char = chunk:sub(fnrtv, fnrtv)
-        chunk = chunk:sub(#ln + 2)
-
-        if #ln > 0 then textwrite(self, ln) end
-
-        local wrapped = false
-        if self.cx == self.w + 1 then
-          wrapped = true
-          corral(self)
-        end
-
-        if char == "\r" then
-          self.cx = 1
-
-        elseif char == "\t" then
-          self.cx =
-            tab_width * math.floor((self.cx + tab_width + 1) / tab_width) - 1
-          if self.cx > self.w then self.cx = 1 self.cy = self.cy + 1 end
-          corral(self)
-
-        else
-          if wrapped or self.just_wrapped then
-            self.just_wrapped = false
-
-          else
-            self.cy = self.cy + 1
-            corral(self)
-          end
-        end
-
-      else
-        textwrite(self, chunk)
-        self.just_wrapped = self.cx == self.w + 1
-        corral(self)
-        break
-      end
-    end
-  end
-
-  local function togglecursor(self)
-    if not self.cursor then return end
-
-    corral(self)
-    local cc, cf, cb, pf, pb = self.gpu.get(self.cx, self.cy)
-
-    self.gpu.setForeground(pb or cb, not not pb, true)
-    self.gpu.setBackground(pf or cf, not not pf, true)
-    self.gpu.set(self.cx, self.cy, cc)
-    self.gpu.setForeground(self.fg, self.fgpal)
-    self.gpu.setBackground(self.bg, self.bgpal)
-  end
-
-  -- write some text to the output
-  function _tty:write(line)
-    if #line == 0 then return end
-
-    togglecursor(self)
-
-    line = line:gsub("\x9b", "\27[")
-    if self.autocr then
-      line = line:gsub("[\n\v\f]", "%1\r")
-    end
-
-    while #line > 0 do
-      local nesc = line:find("\27", nil, true)
-      local e = (nesc and nesc - 1) or #line
-      local chunk = line:sub(1, e)
-
-      line = line:sub(#chunk + 1)
-      if #chunk > 0 then writelines(self, chunk) end
-
-      if nesc then
-        local css, params, csc, len
-          = line:match("^\27(.)([%d;]*)([%a%d`])()")
-
-        if css and params and csc and len then
-          line = line:sub(len)
-
-          local args = {}
-          local num = ""
-          local plen = #params
-
-          for pos, c in params:gmatch("()(.)") do
-            if c == ";" then
-              args[#args+1] = tonumber(num) or 0
-              num = ""
-
-            elseif tonumber(c) then
-              num = num .. c
-
-              if pos == plen then
-                args[#args+1] = tonumber(num) or 0
-              end
-            end
-          end
-
-          if css == "[" then
-            local func = commands[csc]
-            if func then func(self, args)
-              else printk(k.L_DEBUG, "unknown terminal escape: %q", csc) end
-
-          elseif css == "]" or css == "?" then
-            local func = controllers[csc]
-            if func then func(self, args) end
-
-          elseif css == "#" then -- it is hilarious to me that this exists
-            self.gpu.fill(1, 1, self.w, self.h, "E")
-
-          else
-            local func = nocsi[css]
-            if func then func(self, args) end
-          end
-        end
-      end
-    end
-
-    togglecursor(self)
-  end
-
-  function _tty:flush()
-  end
-
-  local scancode_lookups = {
-    [200] = "A",
-    [208] = "B",
-    [205] = "C",
-    [203] = "D"
-  }
 
   function k.open_tty(gpu, screen)
     checkArg(1, gpu, "string", "table")
     checkArg(2, screen, "string", "nil")
 
     if type(gpu) == "string" then gpu = component.proxy(gpu) end
-    screen = screen or gpu.getScreen()
-    gpu.bind(screen, false)
+    if screen then gpu.bind(screen) end
 
     local w, h = gpu.getResolution()
-
-    local new = {
-      gpu = gpu,
-      w = w, h = h, cx = 1, cy = 1,
-      scrolltop = 1, scrollbot = h,
-      fg = 7, bg = 0,
-      -- attributes
-      altcursor = false, mousereport = 0,
-      autocr = true, cursor = true,
-      echo = true,
-      -- whether or not foreground and background are palette colors
-      fgpal = true, bgpal = true
-    }
-
-    -- Tier 1 GPUs suck, frankly, but we have to support them.
-    if gpu.maxDepth() == 1 then
-      local fg, bg = gpu.setForeground, gpu.setBackground
-
-      function gpu.setPaletteColor() end
-
-      function gpu.setForeground(a,_,t)
-        if t and a == 0 then fg(0) else fg(0xFFFFFF) end
-      end
-
-      function gpu.setBackground(a,_,t)
-        if t and a > 0 then bg(0xFFFFFF) else bg(0) end
-      end
-    end
-
-    for i=1, #colors, 1 do
-      gpu.setPaletteColor(i-1, colors[i])
-    end
-
-    gpu.setForeground(new.fg, true)
-    gpu.setBackground(new.bg, true)
-    gpu.fill(1, 1, w, h, " ")
-
+    local mode = MODE_NORMAL
+    local seq = {}
+    local wbuf, rbuf = "", ""
+    local tab_width = 8
+    local question = false
+    local autocr, reverse, insert, display, mousereport, cursor, altcursor, autowrap
+      = true, false, false, false, false, true, false, true
+    local cx, cy, scx, scy = 1, 1
+    local st, sb = 1, h
+    local fg, bg = colors[8], colors[1]
+    local save = {fg = fg, bg = bg, autocr = autocr, reverse = reverse, display = display, insert = insert,
+      mousereport = mousereport, altcursor = altcursor, cursor = cursor, autowrap = autowrap}
+    local cursorvisible = false
+    local shouldchange = false
     local keyboards = {}
-    for _, kbaddr in pairs(component.invoke(screen, "getKeyboards")) do
+    local new = {}
+
+    for _, kbaddr in pairs(component.invoke(gpu.getScreen(), "getKeyboards")) do
       keyboards[kbaddr] = true
     end
 
-    -- handlers
+    local function setcursor(v)
+      if cursorvisible ~= v then
+        shouldchange = true
+        cursorvisible = v
+        local c, cfg, cbg = gpu.get(cx, cy)
+        gpu.setBackground(cfg)
+        gpu.setForeground(cbg)
+        gpu.set(cx, cy, c)
+      end
+    end
+
+    local function scroll(n)
+      if n < 0 then
+        gpu.copy(1, st, w, sb+n, 0, -n)
+        gpu.fill(1, 1, w, -n, " ")
+      else
+        gpu.copy(1, st+n, w, sb, 0, -n)
+        gpu.fill(1, sb - n + 1, w, n, " ")
+      end
+    end
+
+    local function corral()
+      cx = math.max(1, cx)
+      if cx > w and autowrap then
+        cx = 1
+        cy = cy + 1
+      end
+      if cy > sb then
+        scroll(cy - sb)
+        cy = sb
+      elseif cy < st then
+        scroll(-(st - cy))
+        cy = st
+      end
+    end
+
+    local function clamp()
+      cx, cy = math.min(w, math.max(1, cx)), math.min(h, math.max(1, cy))
+    end
+
+    local function flush()
+      gpu.setForeground(reverse and bg or fg)
+      gpu.setBackground(reverse and fg or bg)
+      repeat
+        local towrite = sub(wbuf, 1, w-cx+1)
+        wbuf = sub(wbuf, #towrite+1)
+        if insert then
+          gpu.copy(cx, cy, w, 1, #towrite, 0)
+        end
+        gpu.set(cx, cy, towrite)
+        cx = cx + #towrite
+        corral()
+      until #wbuf == 0 or not autowrap
+      if new.discipline and #rbuf > 0 then
+        new.discipline:processInput(rbuf)
+        rbuf = ""
+      end
+    end
+
+    local function write(_, str)
+      if #str == 0 then return end
+
+      setcursor(false)
+      if shouldchange then
+        gpu.setForeground(reverse and bg or fg)
+        gpu.setBackground(reverse and fg or bg)
+      end
+
+      local pi = 1
+      for i, c in get_iter(str) do
+        if control_chars[c] then
+          if pi > 0 then
+            wbuf = wbuf .. sub(str, pi, i-1)
+            flush()
+            pi = -1
+          end
+          -- control characters are always processed, even in the middle of a sequence
+          if c == BEL then
+            computer.beep()
+          elseif c == BS then
+            cx = cx - 1
+            corral()
+          elseif c == HT then
+            cx = tab_width * math.floor((cx + tab_width + 1) / tab_width) - 1
+            corral()
+          elseif c == LF or c == VT or c == FF then
+            if autocr then cx = 1 end
+            cy = cy + 1
+            corral()
+          elseif c == CR then
+            cx = 1
+          elseif c == CAN or c == SUB then
+            mode = MODE_NORMAL
+          elseif c == ESC then -- start new ESC-sequence
+            seq = {}
+            mode = MODE_ESC
+          elseif c == CSI then -- start new CSI-sequence (ESC [)
+            seq = {}
+            question = false
+            mode = MODE_CSI
+          end
+
+        elseif mode == MODE_ESC then
+          if c == "[" then
+            mode = MODE_CSI
+            question = false
+          elseif c == "c" then -- RIS / reset
+            fg, bg = colors[8], colors[1]
+            autocr, reverse, insert, display, mousereport, cursor, altcursor, autowrap
+              = false, false, false, false, false, true, false, true
+          elseif c == "D" then -- IND / line feed
+            cy = cy + 1
+            corral()
+          elseif c == "E" then -- NEL / newline
+            cy = cy + 1
+            cx = 1
+            corral()
+          elseif c == "F" then -- cursor to lower left of screen
+            cx, cy = 1, h
+          elseif c == "H" then -- HTS / set tab stop at current column
+            error("TODO: ESC H")
+          elseif c == "M" then -- RI / reverse linefeed
+            cy = cy - 1
+            corral()
+          elseif c == "Z" then -- DECID / DEC private identification.  return ESC [ ? 6 c (VT102)
+            rbuf = rbuf .. ESC .. "[?6c"
+          elseif c == "7" then -- DECSC / save current state (cursor, attributes, charsets)
+            save = {fg = fg, bg = bg, autocr = autocr, reverse = reverse, display = display, insert = insert,
+              mousereport = mousereport, altcursor = altcursor, cursor = cursor, autowrap = autowrap}
+          elseif c == "8" then -- DECRC / restore last ESC 7 state
+            fg, bg = save.fg, save.bg
+            autocr, reverse, display, insert = save.autocr, save.reverse, save.display, save.insert
+            mousereport, altcursor, cursor, autowrap = save.mousereport, save.altcursor, save.cursor, save.autowrap
+          elseif c == "%" then -- start sequence selecting character set
+            mode = MODE_CHARSET
+          elseif c == "#" then -- start DECALN
+            mode = MODE_DSAT
+          elseif c == "(" then -- define G0
+            mode = MODE_G0 -- TODO
+          elseif c == ")" then -- define G1
+            mode = MODE_G1 -- TODO
+          elseif c == ">" then -- DECPNM / set numeric keypad mode
+            -- TODO
+          elseif c == "=" then -- DECPAM / set application keypad mode
+            -- TODO
+          elseif c == "]" then -- OSC / operating system command
+            mode = MODE_OSC
+          end
+
+        elseif mode == MODE_CSI then
+          if c == "?" then
+            if #seq > 0 or question then
+              mode = MODE_NORMAL
+              question = false
+            else
+              question = true
+            end
+          elseif c == "@" then -- ICH / insert blank characters
+            if seq[1] and seq[1] > 0 then
+              gpu.copy(cx, cy, w, 1, seq[1], 0)
+              gpu.fill(cx, cy, seq[1], 1, " ")
+            end
+          elseif c == "A" then -- CUU / cursor up
+            cy = cy - (seq[1] or 1)
+            clamp()
+          elseif c == "B" or c == "e" then -- CUD, VPR / cursor down
+            cy = cy + (seq[1] or 1)
+            clamp()
+          elseif c == "C" or c == "a" then -- CUF, HPR / cursor right
+            cx = cx + (seq[1] or 1)
+            clamp()
+          elseif c == "D" then -- CUB / cursor left
+            cx = cx - (seq[1] or 1)
+            clamp()
+          elseif c == "E" then -- CNL / cursor down N rows to column 1
+            cx = 1
+            cy = cy - (seq[1] or 1)
+            clamp()
+          elseif c == "F" then -- CPL / cursor up N rows to column 1
+            cx = 1
+            cy = cy + (seq[1] or 1)
+            clamp()
+          elseif c == "G" or c == "`" then -- CHA, HPA / cursor to column
+            cx = (seq[1] or 1)
+            clamp()
+          elseif c == "H" or c == "f" then -- CUP, HVP / cursor to row, column
+            cy, cx = seq[1] or 1, seq[3] or 1
+            clamp()
+          elseif c == "J" then -- ED / erase display
+            local m = seq[1] or 0
+            if m == 0 then
+              -- erase from cursor to end
+              gpu.fill(cx, cy, w, 1, " ")
+              gpu.fill(1, cy+1, w, h, " ")
+            elseif m == 1 then
+              -- erase from start to cursor
+              gpu.fill(1, 1, w, cy-1, " ")
+              gpu.fill(1, cy, cx, 1, " ")
+            elseif m == 2 or m == 3 then
+              -- erase whole screen
+              gpu.fill(1, 1, w, h, " ")
+            end
+          elseif c == "K" then -- EL / erase line
+            local m = seq[1] or 0
+            if m == 0 then -- erase from cursor to end
+              gpu.fill(cx, cy, w, 1, " ")
+            elseif m == 1 then -- erase from start to cursor
+              gpu.fill(1, cy, cx, 1, " ")
+            elseif m == 2 then -- erase whole line
+              gpu.fill(1, cy, w, 1, " ")
+            end
+          elseif c == "L" then -- IL / insert blank lines
+            local n = seq[1] or 1
+            gpu.copy(1, cy, w, h, 0, n)
+            gpu.fill(1, cy, w, n, " ")
+          elseif c == "M" then -- DL / delete lines
+            local n = seq[1] or 1
+            gpu.copy(1, cy, w, h, 0, -n)
+            gpu.fill(1, h-n, w, n, " ")
+          elseif c == "P" then -- DCH / delete characters
+            local n = seq[1] or 1
+            gpu.copy(cx, cy, w, 1, -n, 0)
+          elseif c == "S" then -- not in console_codes(4) / scroll down
+            scroll(seq[1] or 1)
+          elseif c == "T" then -- not in console_codes(4) / scroll up
+            scroll(-(seq[1] or 1))
+          elseif c == "X" then -- ECH / erase characters
+            local n = seq[1] or 1
+            gpu.fill(cx, cy, n, 1, " ")
+
+          -- ESC [ a identical to ESC [ C, see above
+          elseif c == "c" then -- DA / answer "VT102"
+            rbuf = rbuf .. ESC .. "?6c"
+          elseif c == "d" then -- VPA / move cursor to row, current column
+            cy = seq[1] or 1
+            clamp()
+          -- e / VPR identical to B
+          -- f / HVP identical to H
+          elseif c == "g" then -- TBC / clear current tab stop
+            -- TODO
+            -- if arg == 3 clear ALL tab stops
+          elseif c == "h" or c == "l" then -- SM, RM / set mode, reset mode
+            local set = c == "h"
+            if question then -- DEC private modes
+              for i=1, #seq, 2 do
+                if seq[i] == 1 then -- DECCKM / cursor keys send ESC O instead of ESC [
+                  altcursor = set
+                -- DECCOLM / 80/132 col switch not implemented
+                -- DECSCNM / reverse video mode not implemented
+                elseif seq[i] == 6 then -- DECOM / cursor addressing relative to scroll region
+                  -- TODO
+                elseif seq[i] == 7 then -- DECAWM / autowrap
+                  autowrap = set
+                elseif seq[i] == 9 then -- X10 mouse reporting
+                  mousereport = set and 1 or 0
+                elseif seq[i] == 25 then -- DECTECM / set cursor visible
+                  cursor = set
+                elseif seq[i] == 1000 then -- X11 mouse reporting
+                  mousereport = set and 2 or 0
+                end
+              end
+
+            else -- ECMA-48 modes
+              for i=1, #seq, 2 do
+                if seq[i] == 3 then -- DECCRM / display control characters
+                  display = set
+                elseif seq[i] == 4 then -- set insert mode
+                  insert = set
+                elseif seq[i] == 20 then -- autocr
+                  autocr = set
+                end
+              end
+            end
+          elseif c == "m" then -- SGR / set attributes
+            if not seq[1] then seq[1] = 0 end
+            for i=1, #seq, 2 do
+              -- only implement a subset of these that it makes sense to
+              if seq[i] == 0 then -- reset
+                fg, bg = colors[8], colors[1]
+                reverse = false
+              elseif seq[i] == 7 then -- reverse
+                reverse = true
+              elseif seq[i] == 27 then -- unset reverse
+                reverse = false
+              elseif seq[i] > 29 and seq[i] < 38 then -- foreground
+                fg = colors[seq[i] - 29]
+                shouldchange = true
+              elseif seq[i] > 39 and seq[i] < 48 then -- background
+                bg = colors[seq[i] - 39]
+                shouldchange = true
+                -- TODO: 38/48 rgb color support?
+              elseif seq[i] == 39 then -- default fg
+                fg = colors[8]
+                shouldchange = true
+              elseif seq[i] == 49 then -- default bg
+                bg = colors[1]
+                shouldchange = true
+              elseif seq[i] > 89 and seq[i] < 98 then -- bright foreground
+                fg = colors[seq[i] - 81]
+                shouldchange = true
+              elseif seq[i] > 99 and seq[i] < 108 then -- bright background
+                bg = colors[seq[i] - 91]
+                shouldchange = true
+              end
+            end
+          elseif c == "n" then -- DSR / status report
+            for i=1, #seq, 2 do
+              if seq[i] == 5 then -- DSR / device status report
+                rbuf = rbuf .. ESC .. "[0n" -- Terminal OK
+              elseif seq[i] == 6 then -- CPR / cursor position report
+                rbuf = rbuf .. string.format("%s[%d;%dR", ESC, cy, cx)
+              end
+            end
+          -- no [ q / DECLL, keyboard LEDs not implemented
+          elseif c == "r" then -- DECSTBM / set scrolling region
+            st, sb = seq[1] or 1, seq[2] or h
+          elseif c == "s" then -- ? / save cursor position
+            scx, scy = cx, cy
+          elseif c == "u" then -- ? / restore cursor position
+            cx, cy = scx or cx, scy or cy
+          -- HPA identical to CHA/G
+
+          -- CSI [ c and ESC [ [ c are ignored, to ignore echoed function keys
+          elseif c == "[" then
+            seq = "["
+          elseif seq == "[" then
+            mode = MODE_NORMAL
+
+          elseif c == ";" then
+            if seq[#seq] == ";" then
+              seq[#seq+1] = 0
+            end
+            seq[#seq+1] = ";"
+          elseif tonumber(c) then
+            if seq[#seq] == ";" then
+              seq[#seq+1] = tonumber(c)
+            else
+              seq[math.max(1, #seq)] = (seq[#seq] or 0) * 10 + tonumber(c)
+            end
+          end
+
+          if c ~= ";" and c ~= "?" and not tonumber(c) then
+            mode = MODE_NORMAL
+          end
+
+        elseif mode == MODE_NORMAL then
+          if pi < 1 then
+            pi = i
+          end
+
+        elseif mode == MODE_OSC then
+          -- TODO
+          mode = MODE_NORMAL
+
+        elseif mode == MODE_G0 then
+          mode = MODE_NORMAL -- TODO
+
+        elseif mode == MODE_G1 then
+          mode = MODE_NORMAL -- TODO
+
+        elseif mode == MODE_CHARSET then
+          mode = MODE_NORMAL -- TODO
+
+        elseif mode == MODE_DSAT then
+          if c == "8" then
+            gpu.fill(1, 1, w, h, "E")
+          end
+          mode = MODE_NORMAL
+        end
+      end
+
+      if pi > 0 then
+        wbuf = wbuf .. sub(str, pi, #str)
+      end
+
+      flush()
+
+      if mode == MODE_NORMAL and cursor then
+        setcursor(true)
+      end
+    end
+
+    new.write = write
+    new.flush = function() end
+
     new.khid = k.add_signal_handler("key_down", function(_, kbd, char, code)
       if not keyboards[kbd] then return end
       if not new.discipline then return end
@@ -686,8 +535,8 @@ do
       local to_buffer
       if scancode_lookups[code] then
         local c = scancode_lookups[code]
-        local interim = new.altcursor and "O" or "["
-        to_buffer = "\27" .. interim .. c
+        local interim = altcursor and "O" or "["
+        to_buffer = ESC .. interim .. c
 
       elseif char > 0 then
         to_buffer = string.char(char)
@@ -698,30 +547,6 @@ do
       end
     end)
 
-    new.thid = k.add_signal_handler("touch", function(_, addr, x, y, button)
-      if addr ~= screen then return end
-      if not new.discipline then return end
-
-      if new.mousereport > 0 then
-        new.discipline:processInput(string.format("\27[M%s%s%s",
-          string.char(button),
-          string.char(x + 32),
-          string.char(y + 32)))
-      end
-    end)
-
-    new.dhid = k.add_signal_handler("drop", function(_, addr, x, y, button)
-      if addr ~= screen then return end
-      if not new.discipline then return end
-
-      if new.mousereport == 2 then
-        new.discipline:processInput(string.format("\27[M\3%s%s",
-          string.char(x + 32),
-          string.char(y + 32)))
-      end
-    end)
-
-    setmetatable(new, {__index = _tty})
     return new
   end
 
