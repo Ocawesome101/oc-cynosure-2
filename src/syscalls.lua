@@ -565,16 +565,16 @@ end
       return nil, k.errno.ECHILD
     end
 
-    local proc = k.get_process(pid)
-    repeat
-      if proc.stopped and untraced then
-        return "stopped", proc.status
-      end
-
-      if not nohang then coroutine.yield(0) end
-    until proc.is_dead or nohang
-
     local process = k.get_process(pid)
+    if not ((process.stopped and untraced) or nohang or process.is_dead) then
+      repeat
+        local sig, id = coroutine.yield()
+      until ((sig == "proc_stopped" and untraced) or sig == "proc_dead") and id == pid
+    end
+    if process.stopped and untraced then
+      return "stopped", proc.status
+    end
+
     local reason, status = process.reason, process.status or 0
 
     if k.cmdline.log_process_deaths then
@@ -607,7 +607,11 @@ end
         end
       end
 
-      if block then coroutine.yield(0.5) end
+      if block then
+        repeat
+          local sig = coroutine.yield()
+        until sig == "proc_dead"
+      end
     until not block
 
     return nil

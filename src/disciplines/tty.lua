@@ -106,6 +106,7 @@ do
   end
 
   -- process new input from the stream - this is keyboard input
+  -- called internally by tty event handlers
   function discipline:processInput(inp)
     self:flush()
     for c in inp:gmatch(".") do

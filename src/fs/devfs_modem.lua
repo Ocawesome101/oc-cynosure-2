@@ -16,7 +16,8 @@
   along with this program.  If not, see <https://www.gnu.org/licenses/>.
 ]]--
 
-printk(k.L_INFO, "template")
+printk(k.L_INFO, "fs/devfs_modem")
 
 do
+  
 end

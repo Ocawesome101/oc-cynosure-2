@@ -96,7 +96,7 @@ do
       end
 
       local signal = default
-      if deadline == -1 then
+      if deadline < 0 then
         if computer.uptime() - last_yield > 4 then
           last_yield = computer.uptime()
           signal = table.pack(k.pullSignal(0))
@@ -110,6 +110,7 @@ do
       for cpid, process in pairs(processes) do
         if not process.is_dead then
           current = cpid
+          local stop = process.stopped
 
           if computer.uptime() >= process:deadline() or #signal > 0 then
             process:resume(table.unpack(signal, 1, signal.n))
@@ -125,7 +126,15 @@ do
               for id in pairs(process.handlers) do
                 k.remove_signal_handler(id)
               end
+
+              -- queue event to parent
+              table.insert(processes[process.ppid].queue, {"proc_dead", cpid})
             end
+          end
+
+          if stop ~= process.stopped then
+            -- queue event to parent
+            table.insert(processes[process.ppid].queue, {"proc_stopped", cpid})
           end
 
         else
