@@ -19,4 +19,3 @@
 printk(k.L_INFO, "components/main")
 
 --@[{includeif("COMPONENT_CARDDOCK", "src/components/carddock.lua")}]
-
