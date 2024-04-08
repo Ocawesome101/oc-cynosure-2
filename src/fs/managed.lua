@@ -29,6 +29,7 @@ do
   --  devmaj:number present if file is block/chardev
   --  devmin:number present if file is block/chardev
   --  created:number
+  --  symtarget:string present if file is a link
 
   -- take the attribute file data and return a table
   local function load_attributes(data)
@@ -143,6 +144,21 @@ do
     return true
   end
 
+  --== BEGIN OPTIONAL FILESYSTEM NODE FUNCTIONS ==--
+
+  -- Takes a file path and, if that path is a symbolic link, returns
+  -- only the path to which the link points.
+  function _node:islink(path)
+    checkArg(1, path, "string")
+    if is_attribute(path) then return nil, k.errno.EACCES end
+    if not self:exists(path) then return nil, k.errno.ENOENT end
+
+    local attributes = self:get_attributes(path)
+    if attributes.mode & 0xF000 == k.FS_SYMLNK then
+      return attributes.symtarget
+    end
+  end
+
   --== BEGIN REQUIRED FILESYSTEM NODE FUNCTIONS ==--
 
   -- Takes a file path and returns only whether that path exists.  Similar to
@@ -211,8 +227,25 @@ do
   end
 
   function _node:link()
-    -- TODO: support symbolic links
+    -- supporting hard links on managed fs is too much work
     return nil, k.errno.ENOTSUP
+  end
+
+  function _node:symlink(target, linkpath, mode)
+    checkArg(1, target, "string")
+    checkArg(2, linkpath, "string")
+
+    if self:exists(linkpath) then return nil, k.errno.EEXIST end
+    self.fs.close(self.fs.open(linkpath, "w"))
+
+    local attributes = {}
+    attributes.mode = (k.FS_SYMLNK | (mode & 0xFFF))
+    attributes.uid = k.syscalls and k.syscalls.geteuid() or 0
+    attributes.gid = k.syscalls and k.syscalls.getegid() or 0
+    attributes.symtarget = target
+    self:set_attributes(linkpath, attributes)
+
+    return true
   end
 
   function _node:unlink(path)

@@ -38,6 +38,7 @@ do
     ENOTTY = 25,
     ENOSYS = 38,
     ENOTEMPTY = 39,
+    ELOOP = 40,
     EUNATCH = 49,
     ELIBEXEC = 83,
     ENOPROTOOPT = 92,

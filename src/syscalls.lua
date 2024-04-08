@@ -407,6 +407,13 @@ end
   -- @tparam string dest The location of the new link
   k.syscalls.link = k.link
 
+  --- Create a symbolic link.
+  -- Presently only supported by managed filesystems.
+  -- @function symlink
+  -- @tparam string target The link target
+  -- @tparam string linkpath The path to the new link
+  k.syscalls.symlink = k.symlink
+
   --- Remove a link.
   -- Removes the file when its link count reaches 0.
   -- @function unlink

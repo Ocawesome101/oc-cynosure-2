@@ -100,7 +100,11 @@ do
     end
   end
 
-  local function path_to_node(path)
+  local function path_to_node(path, symlink, links)
+    links = links or 0
+    if links > 16 then
+      return nil, k.errno.ELOOP
+    end
     path = k.check_absolute(path)
 
     local current = k.current_process()
@@ -119,6 +123,22 @@ do
 
     --printk(k.L_DEBUG, "path_to_node(%s) = %s, %s",
     --  path, tostring(mnt), tostring(rem))
+
+    local node, rem = mounts[mnt], rem or "/"
+    if node.islink and not nosymlink then
+      local components = k.split_path(rem)
+      local _path = node:islink(rem)
+      if _path then
+        return path_to_node(_path, false, links + 1)
+      end
+      for i, segment in ipairs(k.split_path(rem)) do
+        local part = table.concat(rem, "/", 1, i)
+        local _path = node:islink(part)
+        if _path then
+          return path_to_node(_path, false, links + 1)
+        end
+      end
+    end
 
     return mounts[mnt], rem or "/"
   end
@@ -456,6 +476,31 @@ do
     end
 
     return node:link(sremain, dremain)
+  end
+
+  function k.symlink(target, linkpath)
+    checkArg(1, target, "string")
+    checkArg(2, linkpath, "string")
+
+    local node, remain = path_to_node(file)
+    if not node.symlink then return nil, k.errno.ENOSYS end
+    if not node:exists(remain) then return nil, k.errno.ENOENT end
+
+    local segs = k.split_path(remain)
+    local dir = "/" .. table.concat(segs, "/", 1, #segs - 1)
+    local base = segs[#segs]
+
+    local stat, err = node:stat(dir)
+    if not stat then
+      return nil, err
+    end
+
+    if not k.process_has_permission(cur_proc(), stat, mode) then
+      return nil, k.errno.EACCES
+    end
+
+    local umask = (cur_proc().umask or 0) ~ 511
+    return node:symlink(remain, mode, stat.mode & umask)
   end
 
   function k.unlink(path)
