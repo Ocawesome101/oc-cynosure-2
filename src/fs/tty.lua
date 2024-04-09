@@ -19,16 +19,28 @@
 printk(k.L_INFO, "fs/tty")
 
 do
-  local ttyn = 0
+  local ttyn = 1
 
   -- dynamically register ttys
   function k.init_ttys()
-    local screens = {}
+    local usedScreens = {}
+    local gpus, screens = {}, {}
 
     for gpu in component.list("gpu", true) do
-      for screen in component.list("screen", true) do
-        if not screens[screen] then
-          screens[screen] = true
+      gpus[#gpus+1] = gpu
+    end
+
+    for screen in component.list("screen", true) do
+      screens[#screens+1] = screen
+    end
+
+    table.sort(gpus)
+    table.sort(screens)
+
+    for _, gpu in ipairs(gpus) do
+      for _, screen in ipairs(screens) do
+        if not usedScreens[screen] then
+          usedScreens[screen] = true
           printk(k.L_DEBUG, "registering tty%d on %s,%s", ttyn,
             gpu:sub(1,6), screen:sub(1,6))
 
