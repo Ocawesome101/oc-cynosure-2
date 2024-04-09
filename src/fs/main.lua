@@ -131,12 +131,14 @@ do
       if _path then
         return path_to_node(_path, false, links + 1)
       end
-      local segments = k.split_path(rem)
-      for i, segment in ipairs(segments) do
-        local part = table.concat(segments, "/", 1, i)
-        local _path = node:islink(part)
-        if _path then
-          return path_to_node(_path, false, links + 1)
+      if not node:exists(rem) then
+        local segments = k.split_path(rem)
+        for i, segment in ipairs(segments) do
+          local part = table.concat(segments, "/", 1, i)
+          local _path = node:islink(part)
+          if _path then
+            return path_to_node(_path, false, links + 1)
+          end
         end
       end
     end

@@ -109,7 +109,7 @@ do
       local n, len = 0, #str
       return function()
         n = n + 1
-        if n < len then return n, sub(str, n, n) end
+        if n <= len then return n, sub(str, n, n) end
       end
     end
   end
