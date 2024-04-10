@@ -260,14 +260,15 @@ do
     return self:readNamelistEntry(ent.last_entry), ent.last_entry
   end
 
-  function _node:resolve(path, offset)
+  function _node:resolve(path, offset, startdirdb)
     offset = offset or 0
+    startdirdb = startdirdb or 0
     local segments = split(path)
-    local dir = self:readNamelistEntry(0)
-    local current, cid = dir, 0
+    local dir = self:readNamelistEntry(startdirdb)
+    local current, cid = dir, startdirdb
     if #segments == offset then return current, cid end
     for i=1, #segments - offset do
-      current,cid = self:readNamelistEntry(current.datablock), current.datablock
+      current, cid = self:readNamelistEntry(current.datablock), current.datablock
       while current and current.fname ~= segments[i] do
         current, cid = self:getNext(current)
       end
