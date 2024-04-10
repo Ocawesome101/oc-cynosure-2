@@ -91,11 +91,12 @@ do
 
     local fd = self.fs.open(attr_path(file), "r")
     if not fd then
-      -- default to root/root, rwxrwxrwx permissions
+      -- default to root/root, rw-r--r-- permissions
+      -- directories: rwxr-xr-x
       return {
         uid = k.syscalls and k.syscalls.geteuid() or 0,
         gid = k.syscalls and k.syscalls.getegid() or 0,
-        mode = isdir and 0x41A4 or 0x81A4,
+        mode = isdir and 0x41ED or 0x81A4,
         created = self:lastModified(file)
       }
     end

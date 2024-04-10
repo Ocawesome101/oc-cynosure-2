@@ -133,7 +133,7 @@ do
 
     if type(node) == "table" and not isf then
       return {
-        dev = -1, ino = -1, mode = 0x41A4, nlink = 1, uid = 0, gid = 0,
+        dev = -1, ino = -1, mode = 0x41ED, nlink = 1, uid = 0, gid = 0,
         rdev = -1, size = 0, blksize = 2048
       }
     end

@@ -69,12 +69,12 @@ do
 
     local segments = {}
     for piece in path:gmatch("[^/\\]+") do
+      segments[#segments+1] = piece --[[
       if piece == ".." then
         segments[#segments] = nil
 
       elseif piece ~= "." then
-        segments[#segments+1] = piece
-      end
+      end]]
     end
 
     return segments
@@ -88,30 +88,18 @@ do
   function k.check_absolute(path)
     checkArg(1, path, "string")
 
+    local current = k.current_process()
+    local root = current and current.root or "/"
+    local cwd = current and current.cwd or "/"
     if path:sub(1, 1) == "/" then
-      return "/" .. table.concat(k.split_path(path), "/")
+      return "/" .. table.concat(k.split_path(root .. "/" .. path), "/")
 
     else
-      local current = k.current_process()
-      local cwd = current and current.cwd or "/"
-      return "/" .. table.concat(k.split_path(cwd .. "/" .. path),
-        "/")
-
+      return "/" .. table.concat(k.split_path(cwd .. "/" .. path), "/")
     end
   end
 
-  local function path_to_node(path, symlink, links)
-    links = links or 0
-    if links > 16 then
-      return nil, k.errno.ELOOP
-    end
-    path = k.check_absolute(path)
-
-    local current = k.current_process()
-    if current then
-      path = k.clean_path(current.root .. "/" .. path)
-    end
-
+  local function path_to_node(path)
     local mnt, rem = "/", path
     for m in pairs(mounts) do
       if path:sub(1, #m) == m and #m > #mnt then
@@ -121,32 +109,85 @@ do
 
     if #rem == 0 then rem = "/" end
 
-    --printk(k.L_DEBUG, "path_to_node(%s) = %s, %s",
-    --  path, tostring(mnt), tostring(rem))
-
-    local node, rem = mounts[mnt], rem or "/"
-    if node.islink and not nosymlink then
-      local components = k.split_path(rem)
-      local _path = node:islink(rem)
-      if _path then
-        return path_to_node(_path, false, links + 1)
-      end
-      if not node:exists(rem) then
-        local segments = k.split_path(rem)
-        for i, segment in ipairs(segments) do
-          local part = table.concat(segments, "/", 1, i)
-          local _path = node:islink(part)
-          if _path then
-            return path_to_node(_path, false, links + 1)
-          end
-        end
-      end
-    end
-
     return mounts[mnt], rem or "/"
   end
 
-  k.lookup_file = path_to_node
+  -- returns node, rem, exists, islink
+  local function resolve_path(path, symlink)
+    local lookup = "/"
+
+    local current = k.current_process()
+    if current then
+      if path:sub(1,1) ~= "/" then
+        lookup = current.cwd or lookup
+      else
+        lookup = current.root or lookup
+      end
+    end
+
+    local segments = k.split_path(path)
+    local i = 0
+    while i < #segments do
+      i = i + 1
+      local node, rem = path_to_node(lookup)
+      local stat = node:stat(rem)
+      if not stat then
+        return nil, k.errno.ENOENT
+      end
+
+      if stat.mode & 0xF000 ~= k.FS_DIR then
+        return nil, k.errno.ENOTDIR
+      end
+
+      -- execute permission is also directory search permission
+      if current and not k.process_has_permission(current, stat, "x") then
+        printk(k.L_DEBUG, "EACCES at %q", lookup)
+        return nil, k.errno.EACCES
+      end
+
+      if lookup == "/" then
+        lookup = lookup .. segments[i]
+      else
+        lookup = lookup .. "/" .. segments[i]
+      end
+
+      local node, rem = path_to_node(lookup)
+      stat = node:stat(rem)
+      if i < #segments and not stat then
+        return nil, k.errno.ENOENT
+      elseif stat then
+        if stat.mode & 0xF000 == k.FS_SYMLNK then
+          if nosymlink then
+            return nil, k.errno.ENOTDIR
+          else
+            local new_path = node:islink(rem)
+            if new_path:sub(1,1) == "/" then
+              lookup = new_path
+            else
+              lookup = lookup:gsub("/?[^/]*$", "")
+              for j=i, #segments do segments[j] = nil end
+              for j, segment in ipairs(k.split_path(new_path)) do
+                segments[i+j] = segment[j]
+              end
+            end
+          end
+        end
+
+        printk(k.L_DEBUG, "lookup path: %s", lookup)
+      end
+
+      if i == #segments then
+        printk(k.L_DEBUG, debug.traceback("resolve_path = %s, %s, %q, %q"),
+          tostring(node), rem, not not stat, stat and (stat.mode & 0xF000 == k.FS_SYMLNK))
+        return node, rem, not not stat, stat and (stat.mode & 0xF000 == k.FS_SYMLNK)
+      end
+    end
+
+    local node, rem = path_to_node(lookup)
+    return node, rem, true, false
+  end
+
+  k.lookup_file = resolve_path
 
   local default_proc = {euid = 0, gid = 0}
   local function cur_proc()
@@ -266,7 +307,8 @@ do
     checkArg(1, file, "string")
     checkArg(2, mode, "string")
 
-    local node, remain = path_to_node(file)
+    local node, remain = resolve_path(file)
+    if not node then return nil, remain end
     if not node.open then return nil, k.errno.ENOSYS end
 
     local exists = node:exists(remain)
@@ -376,7 +418,8 @@ do
 
     path = k.check_absolute(path)
 
-    local node, remain = path_to_node(path)
+    local node, remain = resolve_path(path)
+    if not node then return nil, remain end
     if not node.opendir then return nil, k.errno.ENOSYS end
     if not node:exists(remain) then return nil, k.errno.ENOENT end
 
@@ -422,7 +465,8 @@ do
   function k.stat(path)
     checkArg(1, path, "string")
 
-    local node, remain = path_to_node(path)
+    local node, remain = resolve_path(path)
+    if not node then return nil, remain end
     if not node.stat then return nil, k.errno.ENOSYS end
 
     local statx, errno = node:stat(remain)
@@ -439,7 +483,8 @@ do
     checkArg(1, path, "string")
     checkArg(2, mode, "number", "nil")
 
-    local node, remain = path_to_node(path)
+    local node, remain = resolve_path(path)
+    if not node then return nil, remain end
     if not node.mkdir then return nil, k.errno.ENOSYS end
     if node:exists(remain) then return nil, k.errno.EEXIST end
 
@@ -463,8 +508,10 @@ do
     checkArg(1, source, "string")
     checkArg(2, dest, "string")
 
-    local node, sremain = path_to_node(source)
-    local _node, dremain = path_to_node(dest)
+    local node, sremain = resolve_path(source)
+    if not node then return nil, sremain end
+    local _node, dremain = resolve_path(dest)
+    if not _node then return nil, dremain end
 
     if _node ~= node then return nil, k.errno.EXDEV end
     if not node.link then return nil, k.errno.ENOSYS end
@@ -485,7 +532,8 @@ do
     checkArg(1, target, "string")
     checkArg(2, linkpath, "string")
 
-    local node, remain = path_to_node(file)
+    local node, remain = resolve_path(file)
+    if not node then return nil, remain end
     if not node.symlink then return nil, k.errno.ENOSYS end
     if not node:exists(remain) then return nil, k.errno.ENOENT end
 
@@ -509,7 +557,8 @@ do
   function k.unlink(path)
     checkArg(1, path, "string")
 
-    local node, remain = path_to_node(path)
+    local node, remain = resolve_path(path)
+    if not node then return nil, remain end
     if not node.unlink then return nil, k.errno.ENOSYS end
     if not node:exists(remain) then return nil, k.errno.ENOENT end
 
@@ -528,7 +577,8 @@ do
     checkArg(1, path, "string")
     checkArg(2, mode, "number")
 
-    local node, remain = path_to_node(path)
+    local node, remain = resolve_path(path)
+    if not node then return nil, remain end
     if not node.chmod then return nil, k.errno.ENOSYS end
     if not node:exists(remain) then return nil, k.errno.ENOENT end
 
@@ -547,7 +597,8 @@ do
     checkArg(2, uid, "number")
     checkArg(3, gid, "number")
 
-    local node, remain = path_to_node(path)
+    local node, remain = resolve_path(path)
+    if not node then return nil, remain end
     if not node.chown then return nil, k.errno.ENOSYS end
     if not node:exists(remain) then return nil, k.errno.ENOENT end
 
