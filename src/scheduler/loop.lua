@@ -127,12 +127,16 @@ do
                 k.remove_signal_handler(id)
               end
 
-              -- queue event to parent
-              table.insert(processes[process.ppid].queue, {"proc_dead", cpid})
+              if cpid > 1 then
+                -- queue event to parent
+                table.insert(processes[process.ppid].queue, {"proc_dead", cpid})
+              else
+                processes[cpid] = nil
+              end
             end
           end
 
-          if stop ~= process.stopped then
+          if stop ~= process.stopped and cpid > 1 then
             -- queue event to parent
             table.insert(processes[process.ppid].queue, {"proc_stopped", cpid})
           end
@@ -158,8 +162,9 @@ do
     return pid
   end
 
+  local default_proc = { uid = 0, gid = 0, euid = 0, egid = 0 }
   function k.current_process()
-    return processes[current]
+    return processes[current] or default_proc
   end
 
   function k.get_process(rpid)
