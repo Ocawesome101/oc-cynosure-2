@@ -69,12 +69,9 @@ do
 
     local segments = {}
     for piece in path:gmatch("[^/\\]+") do
-      segments[#segments+1] = piece --[[
-      if piece == ".." then
-        segments[#segments] = nil
-
-      elseif piece ~= "." then
-      end]]
+      if piece ~= "." then
+        segments[#segments+1] = piece
+      end
     end
 
     return segments
@@ -83,20 +80,6 @@ do
   function k.clean_path(path)
     checkArg(1, path, "string")
     return "/" .. table.concat(k.split_path(path), "/")
-  end
-
-  function k.check_absolute(path)
-    checkArg(1, path, "string")
-
-    local current = k.current_process()
-    local root = current and current.root or "/"
-    local cwd = current and current.cwd or "/"
-    if path:sub(1, 1) == "/" then
-      return "/" .. table.concat(k.split_path(root .. "/" .. path), "/")
-
-    else
-      return "/" .. table.concat(k.split_path(cwd .. "/" .. path), "/")
-    end
   end
 
   local function path_to_node(path)
@@ -112,79 +95,128 @@ do
     return mounts[mnt], rem or "/"
   end
 
-  -- returns node, rem, exists, islink
-  local function resolve_path(path, symlink)
-    local lookup = "/"
+  local function construct_dirfd(path, node, dfd, parent)
+    return {
+      parent = parent,
+      path = path,
+      node = node,
+      fd = dfd,
+      child = 0,
+      open = 0
+    }
+  end
 
-    local current = k.current_process()
-    if current then
-      if path:sub(1,1) ~= "/" then
-        lookup = current.cwd or lookup
-      else
-        lookup = current.root or lookup
+  local function __opendirat(fd, target)
+    local new = construct_dirfd(fd.node, fd.node:openat(fd.fd, target), fd)
+    new.open = new.open + 1
+    fd.child = fd.child + 1
+    return new
+  end
+
+  local function __closedir(fd)
+    fd.open = fd.open - 1
+    if fd.open == 0 and fd.child == 0 then
+      fd.node:close(fd.fd)
+    end
+
+    if fd.parent then
+      fd.parent.child = fd.parent.child - 1
+      if fd.parent.child == 0 then
+        __closedir(fd.parent)
       end
     end
+  end
+
+  local function __dup(fd)
+    fd.open = fd.open + 1
+    return fd
+  end
+
+  -- returns dirfd and whether the file exists
+  local function resolve_path(path, symlink)
+    local lookup = {}
+
+    local current = k.current_process()
+    if current.cwd then
+      if path:sub(1,1) ~= "/" then
+        lookup = __dup(current.cwd)
+      else
+        lookup = __dup(current.root)
+      end
+    end
+
+    -- TODO handle no current process
 
     local segments = k.split_path(path)
     local i = 0
     while i < #segments do
       i = i + 1
-      local node, rem = path_to_node(lookup)
-      local stat = node:stat(rem)
+
+      local stat = lookup.node:fstatat(lookup.fd, segments[i])
       if not stat then
-        return nil, k.errno.ENOENT
+        if segments[i] == ".." then
+          -- this particular order is necessary due to how __closedir() works
+          lookup.parent.open = lookup.parent.open + 1
+          __closedir(lookup)
+          lookup = lookup.parent
+          stat = lookup.node:fstatat(lookup.fd, ".")
+
+        elseif i == #segments then
+          return lookup, false
+
+        else
+          return nil, k.errno.ENOENT
+        end
       end
 
-      if stat.mode & 0xF000 ~= k.FS_DIR then
-        return nil, k.errno.ENOTDIR
-      end
+      local ftype = stat.mode & 0xF000
+      if ftype == k.FS_SYMLNK and (symlink or i < #segments) then
+        local path = lookup.node:readlinkat(lookup.fd)
+        local new = k.split_path(path)
 
-      -- execute permission is also directory search permission
-      if current and not k.process_has_permission(current, stat, "x") then
-        printk(k.L_DEBUG, "EACCES at %q", lookup)
-        return nil, k.errno.EACCES
-      end
+        if path:sub(1,1) == "/" then
+          __closedir(lookup)
 
-      if lookup == "/" then
-        lookup = lookup .. segments[i]
-      else
-        lookup = lookup .. "/" .. segments[i]
-      end
-
-      local node, rem = path_to_node(lookup)
-      stat = node:stat(rem)
-      if i < #segments and not stat then
-        return nil, k.errno.ENOENT
-      elseif stat then
-        if stat.mode & 0xF000 == k.FS_SYMLNK then
-          if nosymlink then
-            return nil, k.errno.ENOTDIR
-          else
-            local new_path = node:islink(rem)
-            if new_path:sub(1,1) == "/" then
-              lookup = new_path
-            else
-              lookup = lookup:gsub("/?[^/]*$", "")
-              for j=i, #segments do segments[j] = nil end
-              for j, segment in ipairs(k.split_path(new_path)) do
-                segments[i+j] = segment[j]
-              end
-            end
-          end
+          -- TODO handle no current process
+          lookup = __dup(current.root)
         end
 
-        printk(k.L_DEBUG, "lookup path: %s", lookup)
-      end
+        for j=1, #new do
+          segments[i+j] = new[j]
+        end
+        for j=i+#new+1, #segments do segments[j] = nil end
 
-      if i == #segments then
-        printk(k.L_DEBUG, debug.traceback("resolve_path = %s, %s, %q, %q"),
-          tostring(node), rem, not not stat, stat and (stat.mode & 0xF000 == k.FS_SYMLNK))
-        return node, rem, not not stat, stat and (stat.mode & 0xF000 == k.FS_SYMLNK)
+      elseif ftype == k.FS_DIR and i < #segments then
+        -- execute permission is also directory search permission
+        if not k.process_has_permission(current, stat, "x") then
+          __closedir(lookup)
+          return nil, k.errno.EACCES
+        end
+
+        if mounts[lookup.path] and segments[i+1] ~= ".." then
+          local mnt = mounts[lookup.path]
+          local new = construct_dirfd(mnt, mnt:open_root(), lookup)
+          lookup.child = lookup.child + 1
+          __closedir(lookup)
+          new.open = new.open + 1
+          fd.child = fd.child + 1
+          lookup = new
+        else
+          local nfd = __opendirat(lookup, segments[i])
+          __closedir(lookup)
+          lookup = nfd
+        end
+
+      elseif i < #segments then
+        return nil, k.errno.ENOTDIR
+
+      else
+        return lookup, true
       end
     end
 
-    local node, rem = path_to_node(lookup)
-    return node, rem, true, false
+    -- this should never be reached, i think?
+    return nil, k.errno.ENOPROTOOPT
   end
 
   k.lookup_file = resolve_path
@@ -205,50 +237,60 @@ do
 
     if cur_proc().euid ~= 0 then return nil, k.errno.EACCES end
 
-    if path ~= "/" then
-      local stat = k.stat(path)
-      if (not stat) then
-        return nil, k.errno.ENOENT
-
-      elseif (stat.mode & 0xF000) ~= 0x4000 then
-        return nil, k.errno.ENOTDIR
-      end
-    end
-
-    path = k.check_absolute(path)
     if mounts[path] then
       return nil, k.errno.EBUSY
     end
 
+    local segments = k.split_path(path)
+    for i=#segments, 1 do
+      if segments[i] == ".." and segments[i-1] then
+        table.remove(segments, i-1)
+        table.remove(segments, i-1)
+      end
+    end
+
+    path = "/" .. table.concat(segments, "/")
+
+    local dirfd
+    local last = segments[#segments]
+
+    if path ~= "/" then
+      local exists
+      dirfd, exists = resolve_path(path)
+
+      if not exists then
+        __closedir(dirfd)
+        return nil, k.errno.ENOENT
+
+      else
+        local stat = k.fstatat(dirfd, last)
+        if (stat.mode & 0xF000) ~= 0x4000 then
+          __closedir(dirfd)
+          return nil, k.errno.ENOTDIR
+        end
+      end
+    end
+
+    if dirfd then __closedir(dirfd) end
+
     local proxy = node
     if type(node) == "string" then
       if node:find("/", nil, true) then
-        local absolute = k.check_absolute(node)
-        local node, rem = k.lookup_file(node)
-        if (not node) then
+        local ndirfd, exists = k.lookup_file(node)
+        if not exists then
+          __closedir(ndirfd)
           return nil, k.errno.ENOENT
-        elseif (node.address ~= "devfs") then
+
+        elseif not ndirfd.device then
+          __closedir(ndirfd)
           return nil, k.errno.ENODEV
         end
 
-        local dentry, drem = k.devfs.lookup(rem)
+        local dentry = ndirfd.device
+        __closedir(ndirfd)
 
-        if (not dentry) then
-          return nil, drem
-        end
-
-        if dentry.address == "components" then
-          local hand, err = dentry:open(drem)
-          if not hand then
-            return nil, err
-          end
-
-          if hand.proxy.type ~= "filesystem" and
-              hand.proxy.type ~= "drive" then
-            return nil, k.errno.ENOTBLK
-          end
-          proxy = recognize_filesystem(hand.proxy)
-
+        if dentry.type == "filesystem" or dentry.type == "drive" then
+          proxy = recognize_filesystem(dentry)
         elseif dentry.type == "blkdev" then
           proxy = dentry.fs
         else
@@ -259,12 +301,13 @@ do
         if not proxy then return nil, k.errno.EUNATCH end
 
       else
-        node = component.proxy(node) or k.devfs.lookup(node) or node
+        node = component.proxy(node) or node
         if node.type == "blkdev" and node.fs then node = node.fs end
         proxy = recognize_filesystem(node)
         if not proxy then return nil, k.errno.EUNATCH end
       end
     end
+
     if not node then return nil, k.errno.ENODEV end
 
     proxy.mountType = proxy.mountType or "managed"
@@ -283,7 +326,6 @@ do
 
     if cur_proc().euid ~= 0 then return nil, k.errno.EACCES end
 
-    path = k.clean_path(path)
     if not mounts[path] then
       return nil, k.errno.EINVAL
     end
