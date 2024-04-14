@@ -98,16 +98,17 @@ do
   local function construct_dirfd(path, node, dfd, parent)
     return {
       parent = parent,
-      path = path,
+      path = path:gsub("/+", "/"),
       node = node,
       fd = dfd,
+      dir = true,
       child = 0,
       open = 0
     }
   end
 
   local function __opendirat(fd, target)
-    local new = construct_dirfd(fd.node, fd.node:openat(fd.fd, target), fd)
+    local new = construct_dirfd(fd.path.."/"..target, fd.node, fd.node:opendirat(fd.fd, target), fd)
     new.open = new.open + 1
     fd.child = fd.child + 1
     return new
@@ -136,7 +137,7 @@ do
     local current = k.current_process()
     if not current.root then
       local mnt = mounts["/"]
-      local new = construct_dirfd(mnt, mnt:open_root())
+      local new = construct_dirfd("/", mnt, mnt:open_root())
       new.parent = new
       return new
     end
@@ -152,6 +153,7 @@ do
   local function resolve_path(path, symlink, from)
     local lookup
 
+    local current = k.current_process()
     if type(from) == "table" then
       lookup = __dup(from)
     else
@@ -162,6 +164,7 @@ do
     local i = 0
     while i < #segments do
       i = i + 1
+      printk(k.L_DEBUG, "%s <- %s", segments[i], tostring(lookup.path))
 
       local stat = lookup.node:fstatat(lookup.fd, segments[i])
       if not stat then
@@ -203,13 +206,14 @@ do
           return nil, k.errno.EACCES
         end
 
-        if mounts[lookup.path] and segments[i+1] ~= ".." then
-          local mnt = mounts[lookup.path]
-          local new = construct_dirfd(mnt, mnt:open_root(), lookup)
+        local nextp = (lookup.path.."/"..segments[i]):gsub("/+", "/")
+        printk(k.L_DEBUG, "mount check %s from node %s", nextp, tostring(lookup.node))
+        if mounts[nextp] and segments[i+1] ~= ".." then
+          local mnt = mounts[nextp]
+          local new = construct_dirfd(nextp, mnt, mnt:open_root(), lookup)
           lookup.child = lookup.child + 1
           __closedir(lookup)
           new.open = new.open + 1
-          fd.child = fd.child + 1
           lookup = new
         else
           local nfd = __opendirat(lookup, segments[i])
@@ -381,7 +385,7 @@ do
     checkArg(3, mode, "string")
 
     local err
-    local _dirfd, exists, last, stat = resolve_path(file, false, dirfd)
+    local _dirfd, exists, last, stat = resolve_path(path, false, dirfd)
     if not _dirfd then return nil, exists end
     if mode ~= "w" and mode ~= "a" and not exists then
       __closedir(_dirfd)
@@ -571,7 +575,7 @@ do
   function k.mkdirat(dirfd, path, mode)
     verify_fd(dirfd, true)
     checkArg(2, path, "string")
-    checkArg(3, mode, "string")
+    checkArg(3, mode, "number", "nil")
 
     local _dirfd, exists, last, stat = resolve_path(path, false, dirfd)
     if not _dirfd then return nil, exists end
@@ -579,7 +583,7 @@ do
       __closedir(_dirfd)
       return nil, k.errno.EEXIST
     end
-    if not _dirfd.node.mkdir then
+    if not _dirfd.node.mkdirat then
       __closedir(dirfd)
       return nil, k.errno.ENOSYS
     end
@@ -593,7 +597,7 @@ do
 
     local umask = (cur_proc().umask or 0) ~ 511
 
-    local done, failed = _dirfd.node:mkdirat(_dirfd.fd, last, (mode or stat.mode) & umask)
+    local done, failed = _dirfd.node:mkdirat(_dirfd.fd, last, (mode or parent.mode) & umask)
     __closedir(_dirfd)
 
     if not done then return nil, failed end
@@ -635,7 +639,7 @@ do
     if sdfd.node ~= ddfd.node then
       __closedir(sdfd)
       __closedir(ddfd)
-      return nil. k.errno.EXDEV
+      return nil, k.errno.EXDEV
     end
 
     local parent = ddfd.node:fstat(ddfd.fd)

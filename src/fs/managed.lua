@@ -253,7 +253,7 @@ do
     return self:__chown(fd.path, uid, gid)
   end
 
-  function __node:fchownat(dfd, name, uid, gid)
+  function _node:fchownat(dfd, name, uid, gid)
     check_dirfd(dfd)
     checkArg(2, name, "string")
     checkArg(3, uid, "number")
@@ -326,7 +326,7 @@ do
   end
 
   function _node:mkdirat(dfd, name, mode)
-    check_dfd(dfd)
+    check_dirfd(dfd)
     checkArg(2, name, "string")
     checkArg(3, mode, "number")
 
@@ -405,7 +405,7 @@ do
   function _node:openat(dfd, name, mode, permissions)
     check_dirfd(dfd)
     checkArg(2, name, "string")
-    checkArg(2, mode, "string")
+    checkArg(3, mode, "string")
 
     return self:__open(dfd.path.."/"..name, mode, permissions)
   end

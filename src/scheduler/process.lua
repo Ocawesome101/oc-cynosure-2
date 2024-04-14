@@ -184,6 +184,8 @@ do
   function k.create_process(pid, parent)
     parent = parent or default_parent
 
+    local root = parent.root or k.opendir("/")
+
     local new = setmetatable({
       -- local event queue
       queue = {},
@@ -227,9 +229,9 @@ do
       sgid = parent.gid or 0,
 
       -- working directory
-      cwd = parent.cwd or "/",
+      cwd = parent.cwd or root,
       -- root directory
-      root = parent.root or "/",
+      root = parent.root or root,
 
       -- file descriptors
       fds = {},
