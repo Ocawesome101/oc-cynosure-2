@@ -132,20 +132,31 @@ do
     return fd
   end
 
-  -- returns dirfd and whether the file exists
-  local function resolve_path(path, symlink)
-    local lookup = {}
-
+  local function get_basedir(path)
     local current = k.current_process()
-    if current.cwd then
-      if path:sub(1,1) ~= "/" then
-        lookup = __dup(current.cwd)
-      else
-        lookup = __dup(current.root)
-      end
+    if not current.root then
+      local mnt = mounts["/"]
+      local new = construct_dirfd(mnt, mnt:open_root())
+      new.parent = new
+      return new
     end
 
-    -- TODO handle no current process
+    if path:sub(1,1) == "/" then
+      return current.root
+    else
+      return current.cwd
+    end
+  end
+
+  -- returns dirfd and whether the file exists
+  local function resolve_path(path, symlink, from)
+    local lookup
+
+    if type(from) == "table" then
+      lookup = __dup(from)
+    else
+      lookup = __dup(get_basedir(path))
+    end
 
     local segments = k.split_path(path)
     local i = 0
@@ -162,7 +173,7 @@ do
           stat = lookup.node:fstatat(lookup.fd, ".")
 
         elseif i == #segments then
-          return lookup, false
+          return lookup, false, segments[i]
 
         else
           return nil, k.errno.ENOENT
@@ -177,8 +188,7 @@ do
         if path:sub(1,1) == "/" then
           __closedir(lookup)
 
-          -- TODO handle no current process
-          lookup = __dup(current.root)
+          lookup = __dup(get_basedir(path))
         end
 
         for j=1, #new do
@@ -211,7 +221,7 @@ do
         return nil, k.errno.ENOTDIR
 
       else
-        return lookup, true
+        return lookup, true, segments[i], stat
       end
     end
 
@@ -256,18 +266,18 @@ do
 
     if path ~= "/" then
       local exists
-      dirfd, exists = resolve_path(path)
+      dirfd, exists, name, stat = resolve_path(path)
 
-      if not exists then
+      if not dirfd then
+        return nil, exists
+
+      elseif not exists then
         __closedir(dirfd)
         return nil, k.errno.ENOENT
 
-      else
-        local stat = k.fstatat(dirfd, last)
-        if (stat.mode & 0xF000) ~= 0x4000 then
-          __closedir(dirfd)
-          return nil, k.errno.ENOTDIR
-        end
+      elseif (stat.mode & 0xF000) ~= 0x4000 then
+        __closedir(dirfd)
+        return nil, k.errno.ENOTDIR
       end
     end
 
@@ -345,58 +355,6 @@ do
     return n
   end
 
-  function k.open(file, mode)
-    checkArg(1, file, "string")
-    checkArg(2, mode, "string")
-
-    local node, remain = resolve_path(file)
-    if not node then return nil, remain end
-    if not node.open then return nil, k.errno.ENOSYS end
-
-    local exists = node:exists(remain)
-
-    if mode ~= "w" and mode ~= "a" and not exists then
-      return nil, k.errno.ENOENT
-    end
-
-    local segs = k.split_path(remain)
-    local dir = "/" .. table.concat(segs, "/", 1, #segs - 1)
-    local base = segs[#segs]
-
-    local stat, err
-    if not exists then
-      stat, err = node:stat(dir)
-
-    else
-      stat, err = node:stat(remain)
-    end
-
-    if not stat then
-      return nil, err
-    end
-
-    if not k.process_has_permission(cur_proc(), stat, mode) then
-      return nil, k.errno.EACCES
-    end
-
-    local umask = (cur_proc().umask or 0) ~ 511
-    local fd, err = node:open(remain, mode, stat.mode & umask)
-    if not fd then return nil, err end
-
-    local stream = k.fd_from_node(node, fd, mode)
-    if node.default_mode then
-      stream:ioctl("setvbuf", node.default_mode)
-    end
-
-    if type(fd) == "table" and fd.default_mode then
-      stream:ioctl("setvbuf", fd.default_mode)
-    end
-
-    local ret = { fd = stream, node = stream, refs = 1 }
-    opened[ret] = true
-    return ret
-  end
-
   local function verify_fd(fd, dir)
     checkArg(1, fd, "table")
 
@@ -408,6 +366,63 @@ do
     if (not not fd.dir) ~= (not not dir) then
       error("bad argument #1 (cannot supply dirfd where fd is required, or vice versa)", 2)
     end
+  end
+
+  function k.open(file, mode)
+    checkArg(1, file, "string")
+    checkArg(2, mode, "string")
+
+    return k.openat(get_basedir(file), file, mode)
+  end
+
+  function k.openat(dirfd, path, mode)
+    verify_fd(dirfd, true)
+    checkArg(2, path, "string")
+    checkArg(3, mode, "string")
+
+    local err
+    local _dirfd, exists, last, stat = resolve_path(file, false, dirfd)
+    if not _dirfd then return nil, exists end
+    if mode ~= "w" and mode ~= "a" and not exists then
+      __closedir(_dirfd)
+      return nil, k.errno.ENOENT
+    end
+    if not dirfd.node.openat then
+      __closedir(_dirfd)
+      return nil, k.errno.ENOSYS
+    end
+
+    if not exists then
+      stat, err = _dirfd.node:fstat(dirfd.fd)
+    end
+
+    if not stat then
+      __closedir(_dirfd)
+      return nil, err
+    end
+
+    if not k.process_has_permission(cur_proc(), stat, mode) then
+      __closedir(_dirfd)
+      return nil, k.errno.EACCES
+    end
+
+    local umask = (cur_proc().umask or 0) ~ 511
+    local fd, err = _dirfd.node:openat(_dirfd.fd, last, mode, stat.mode & umask)
+    __closedir(_dirfd)
+    if not fd then return nil, err end
+
+    local stream = k.fd_from_node(_dirfd.node, fd, mode)
+    if dirfd.node.default_mode then
+      stream:ioctl("setvbuf", dirfd.node.default_mode)
+    end
+
+    if type(fd) == "table" and fd.default_mode then
+      stream:ioctl("setvbuf", fd.default_mode)
+    end
+
+    local ret = { fd = stream, node = stream, refs = 1 }
+    opened[ret] = true
+    return ret
   end
 
   function k.ioctl(fd, op, ...)
@@ -457,20 +472,27 @@ do
 
   function k.opendir(path)
     checkArg(1, path, "string")
+    return k.opendirat(get_basedir(path), path)
+  end
 
-    path = k.check_absolute(path)
+  function k.opendirat(dirfd, path)
+    verify_fd(dirfd, true)
+    checkArg(2, path, "string")
 
-    local node, remain = resolve_path(path)
-    if not node then return nil, remain end
-    if not node.opendir then return nil, k.errno.ENOSYS end
-    if not node:exists(remain) then return nil, k.errno.ENOENT end
+    local _dirfd, exists, last, stat = resolve_path(path, false, dirfd)
+    if not _dirfd then return nil, exists end
+    if not exists then
+      __closedir(_dirfd)
+      return nil, k.errno.ENOENT
+    end
 
-    local stat = node:stat(remain)
     if not k.process_has_permission(cur_proc(), stat, "r") then
+      __closedir(_dirfd)
       return nil, k.errno.EACCES
     end
 
-    local fd, err = node:opendir(remain)
+    local fd, err = _dirfd.node:opendirat(dirfd.fd, last)
+    __closedir(_dirfd)
     if not fd then return nil, err end
 
     local ret = { fd = fd, node = node, dir = true, refs = 1 }
@@ -493,7 +515,7 @@ do
     if fd.refs <= 0 then
       opened[fd] = nil
       if not fd.node.close then return nil, k.errno.ENOSYS end
-      if fd.dir then return fd.node:close(fd.fd) end
+      if fd.dir then __closedir(fd) return true end
       return fd.node.close(fd.fd)
     end
   end
@@ -504,14 +526,16 @@ do
     atime = 0, ctime = 0, mtime = 0
   }
 
-  function k.stat(path)
+  function k.stat(path, nolink)
     checkArg(1, path, "string")
 
-    local node, remain = resolve_path(path)
-    if not node then return nil, remain end
-    if not node.stat then return nil, k.errno.ENOSYS end
+    return k.fstatat(get_basedir(path), path, nolink)
+  end
 
-    local statx, errno = node:stat(remain)
+  function k.fstat(fd)
+    verify_fd(fd, fd.dir)
+
+    local statx, errno = fd.node:fstat(fd.fd)
     if not statx then return nil, errno end
 
     for key, val in pairs(stat_defaults) do
@@ -521,27 +545,57 @@ do
     return statx
   end
 
+  function k.fstatat(dirfd, name, nolink)
+    verify_fd(dirfd, true)
+    checkArg(2, name, "string")
+
+    local _dirfd, exists, last, stat = resolve_path(name, nolink, dirfd)
+    if not _dirfd then return nil, exists end
+    __closedir(_dirfd)
+    if not exists then return nil, k.errno.ENOENT end
+
+    for key, val in pairs(stat_defaults) do
+      stat[key] = stat[key] or val
+    end
+
+    return stat
+  end
+
   function k.mkdir(path, mode)
     checkArg(1, path, "string")
     checkArg(2, mode, "number", "nil")
 
-    local node, remain = resolve_path(path)
-    if not node then return nil, remain end
-    if not node.mkdir then return nil, k.errno.ENOSYS end
-    if node:exists(remain) then return nil, k.errno.EEXIST end
+    return k.mkdirat(get_basedir(path), path, mode)
+  end
 
-    local segments = k.split_path(remain)
-    local parent = "/" .. table.concat(segments, "/", 1, #segments - 1)
-    local stat = node:stat(parent)
+  function k.mkdirat(dirfd, path, mode)
+    verify_fd(dirfd, true)
+    checkArg(2, path, "string")
+    checkArg(3, mode, "string")
 
-    if not stat then return nil, k.errno.ENOENT end
-    if not k.process_has_permission(cur_proc(), stat, "w") then
+    local _dirfd, exists, last, stat = resolve_path(path, false, dirfd)
+    if not _dirfd then return nil, exists end
+    if exists then
+      __closedir(_dirfd)
+      return nil, k.errno.EEXIST
+    end
+    if not _dirfd.node.mkdir then
+      __closedir(dirfd)
+      return nil, k.errno.ENOSYS
+    end
+
+    local parent = _dirfd.node:fstat(_dirfd.fd)
+
+    if not k.process_has_permission(cur_proc(), parent, "w") then
+      __closedir(_dirfd)
       return nil, k.errno.EACCES
     end
 
     local umask = (cur_proc().umask or 0) ~ 511
 
-    local done, failed = node:mkdir(remain, (mode or stat.mode) & umask)
+    local done, failed = _dirfd.node:mkdirat(_dirfd.fd, last, (mode or stat.mode) & umask)
+    __closedir(_dirfd)
+
     if not done then return nil, failed end
     return not not done
   end
@@ -550,88 +604,159 @@ do
     checkArg(1, source, "string")
     checkArg(2, dest, "string")
 
-    local node, sremain = resolve_path(source)
-    if not node then return nil, sremain end
-    local _node, dremain = resolve_path(dest)
-    if not _node then return nil, dremain end
+    return k.linkat(get_basedir(source), source, get_basedir(dest), dest)
+  end
 
-    if _node ~= node then return nil, k.errno.EXDEV end
-    if not node.link then return nil, k.errno.ENOSYS end
-    if node:exists(dremain) then return nil, k.errno.EEXIST end
+  function k.linkat(sfd, source, dfd, dest)
+    verify_fd(sfd, true)
+    checkArg(2, source, "string")
+    verify_fd(dfd, true)
+    checkArg(4, dest, "string")
 
-    local segments = k.split_path(dremain)
-    local parent = "/" .. table.concat(segments, "/", 1, #segments - 1)
-    local stat = node:stat(parent)
+    local sdfd, sexist, slast, sstat = resolve_path(source, false, sfd)
+    if not sdfd then return nil, sexist end
+    if not sexist then
+      __closedir(sdfd)
+      return nil, k.errno.ENOENT
+    end
 
-    if not k.process_has_permission(cur_proc(), stat, "w") then
+    local ddfd, dexist, dlast, dstat = resolve_path(dest, false, dfd)
+    if not ddfd then
+      __closedir(sdfd)
+      return nil, dexist
+    end
+
+    if dexist then
+      __closedir(sdfd)
+      __closedir(ddfd)
+      return nil, k.errno.EEXIST
+    end
+
+    if sdfd.node ~= ddfd.node then
+      __closedir(sdfd)
+      __closedir(ddfd)
+      return nil. k.errno.EXDEV
+    end
+
+    local parent = ddfd.node:fstat(ddfd.fd)
+
+    if not k.process_has_permission(cur_proc(), parent, "w") then
+      __clsoedir(sdfd)
+      __closedir(ddfd)
       return nil, k.errno.EACCES
     end
 
-    return node:link(sremain, dremain)
+    local ok, err = ddfd.node:linkat(sdfd.fd, slast, ddfd.fd, dlast)
+    __closedir(sdfd)
+    __closedir(ddfd)
+
+    return ok, err
   end
 
   function k.symlink(target, linkpath)
     checkArg(1, target, "string")
     checkArg(2, linkpath, "string")
 
-    local node, remain = resolve_path(file)
-    if not node then return nil, remain end
-    if not node.symlink then return nil, k.errno.ENOSYS end
-    if not node:exists(remain) then return nil, k.errno.ENOENT end
+    return k.symlinkat(get_basedir(target), target, linkpath)
+  end
 
-    local segs = k.split_path(remain)
-    local dir = "/" .. table.concat(segs, "/", 1, #segs - 1)
-    local base = segs[#segs]
+  function k.symlinkat(dirfd, target, linkpath)
+    verify_fd(dirfd, true)
+    checkArg(2, target, "string")
+    checkArg(3, linkpath, "string")
 
-    local stat, err = node:stat(dir)
-    if not stat then
-      return nil, err
+    local _dirfd, exists, last, stat = resolve_path(linkpath, false, dirfd)
+    if not _dirfd then return nil, exists end
+    if not exists then
+      __closedir(_dirfd)
+      return nil, k.errno.ENOENT
     end
+    
+    local parent = _dirfd.node:fstatat(_dirfd.fd)
 
-    if not k.process_has_permission(cur_proc(), stat, mode) then
+    if not k.process_has_permission(cur_proc(), parent, "w") then
+      __closedir(_dirfd)
       return nil, k.errno.EACCES
     end
 
-    local umask = (cur_proc().umask or 0) ~ 511
-    return node:symlink(remain, mode, stat.mode & umask)
+    local ok, err = node:symlinkat(_dirfd.fd, target, last)
+    __closedir(_dirfd)
+
+    return ok, err
   end
 
   function k.unlink(path)
     checkArg(1, path, "string")
 
-    local node, remain = resolve_path(path)
-    if not node then return nil, remain end
-    if not node.unlink then return nil, k.errno.ENOSYS end
-    if not node:exists(remain) then return nil, k.errno.ENOENT end
+    return k.unlinkat(get_basedir(path), path)
+  end
 
-    -- TODO: look at the sticky bit to see exactly what we should do for perms
-    -- checks
-    local stat = node:stat(remain)
+  function k.unlinkat(dirfd, path)
+    verify_fd(dirfd, true)
+    checkArg(2, path, "string")
+
+    local _dirfd, exists, last, stat = resolve_path(path, false, dirfd)
+    if not _dirfd then return nil, exists end
+    if not exists then
+      __closedir(_dirfd)
+      return nil, k.errno.ENOENT
+    end
 
     if not k.process_has_permission(cur_proc(), stat, "w") then
+      __closedir(_dirfd)
       return nil, k.errno.EACCES
     end
 
-    return node:unlink(remain)
+    local ok, err = _dirfd.node:unlinkat(_dirfd.fd, last)
+    __closedir(_dirfd)
+
+    return ok, err
   end
 
   function k.chmod(path, mode)
     checkArg(1, path, "string")
     checkArg(2, mode, "number")
 
-    local node, remain = resolve_path(path)
-    if not node then return nil, remain end
-    if not node.chmod then return nil, k.errno.ENOSYS end
-    if not node:exists(remain) then return nil, k.errno.ENOENT end
+    return k.chmodat(get_basedir(path), path, mode)
+  end
 
-    local stat = node:stat(remain)
+  function k.fchmod(fd, mode)
+    verify_fd(fd, fd.dir)
+    checkArg(2, mode, "number")
+
+    local statx, errno = fd.node:fstat(fd.fd)
+    if not statx then return nil, errno end
+
+    if not k.process_has_permission(cur_proc(), statx, "w") then
+      return nil, k.errno.EACCES
+    end
+
+    return fd.node:fchmod(fd.fd, mode)
+  end
+
+  function k.fchmodat(dirfd, path, mode)
+    verify_fd(dirfd, true)
+    checkArg(2, path, "string")
+    checkArg(3, mode, "number")
+
+    local _dirfd, exists, last, stat = resolve_path(path, false, dirfd)
+    if not _dirfd then return nil, exists end
+    if not exists then
+      __closedir(_dirfd)
+      return nil, k.errno.ENOENT
+    end
+
     if not k.process_has_permission(cur_proc(), stat, "w") then
+      __closedir(_dirfd)
       return nil, k.errno.EACCES
     end
 
     -- only preserve the lower 12 bits
     mode = (mode & 0xFFF)
-    return node:chmod(remain, mode)
+    local ok, err = _dirfd.node:fchmodat(_dirfd.fd, last, mode)
+    __closedir(_dirfd)
+
+    return ok, err
   end
 
   function k.chown(path, uid, gid)
@@ -639,17 +764,46 @@ do
     checkArg(2, uid, "number")
     checkArg(3, gid, "number")
 
-    local node, remain = resolve_path(path)
-    if not node then return nil, remain end
-    if not node.chown then return nil, k.errno.ENOSYS end
-    if not node:exists(remain) then return nil, k.errno.ENOENT end
+    return k.fchownat(get_basedir(path), path, uid, gid)
+  end
 
-    local stat = node:stat(remain)
-    if not k.process_has_permission(cur_proc(), stat, "w") then
+  function k.fchown(fd, uid, gid)
+    verify_fd(fd, fd.dir)
+    checkArg(2, uid, "number")
+    checkArg(3, gid, "number")
+
+    local statx, errno = fd.node:fstat(fd.fd)
+    if not statx then return nil, errno end
+
+    if not k.process_has_permission(cur_proc(), statx, "w") then
       return nil, k.errno.EACCES
     end
 
-    return node:chown(remain, uid, gid)
+    return fd.node:fchown(fd.fd, uid, gid)
+  end
+
+  function k.fchownat(dirfd, path, uid, gid)
+    verify_dirfd(dirfd, true)
+    checkArg(2, path, "string")
+    checkArg(3, uid, "number")
+    checkArg(4, gid, "number")
+
+    local _dirfd, exists, last, stat = resolve_path(path, false, dirfd)
+    if not _dirfd then return nil, exists end
+    if not exists then
+      __closedir(_dirfd)
+      return nil, k.errno.ENOENT
+    end
+
+    if not k.process_has_permission(cur_proc(), stat, "w") then
+      __closedir(_dirfd)
+      return nil, k.errno.EACCES
+    end
+
+    local ok, err = _dirfd.node:fchownat(_dirfd.fd, last, uid, gid)
+    __closedir(_dirfd)
+
+    return ok, err
   end
 
   function k.mounts()

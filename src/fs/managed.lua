@@ -148,6 +148,13 @@ do
     return (p:gsub("[/\\]+", "/"))
   end
 
+  local function check_fd(fd, fo)
+    checkArg(1, fd, "table")
+    if not (fd.path and ((not fo) or fd.fd)) then
+      checkArg(1, fd, "fd")
+    end
+  end
+
   local function check_dirfd(dfd, n)
     checkArg(n or 1, dfd, "table")
     if not (dfd.path and dfd.dir and dfd.index) then
@@ -391,7 +398,7 @@ do
         attributes.gid = k.syscalls and k.syscalls.getegid() or 0
         self:set_attributes(path, attributes)
       end
-      return fd
+      return {fd = fd, path = path}
     end
   end
 
@@ -404,35 +411,35 @@ do
   end
 
   function _node:read(fd, count)
-    checkArg(1, fd, "table")
+    check_fd(fd, true)
     checkArg(2, count, "number")
 
-    return self.fs.read(fd, count)
+    return self.fs.read(fd.fd, count)
   end
 
   function _node:write(fd, data)
-    checkArg(1, fd, "table")
+    check_fd(fd, true)
     checkArg(2, data, "string")
 
-    return self.fs.write(fd, data)
+    return self.fs.write(fd.fd, data)
   end
 
   function _node:seek(fd, whence, offset)
-    checkArg(1, fd, "table")
+    check_fd(fd, true)
     checkArg(2, whence, "string")
     checkArg(3, offset, "number")
 
-    return self.fs.seek(fd, whence, offset)
+    return self.fs.seek(fd.fd, whence, offset)
   end
 
   -- this function does nothing
   function _node:flush() end
 
   function _node:close(fd)
-    checkArg(1, fd, "table")
+    check_fd(fd)
 
-    if fd.index then return true end
-    return self.fs.close(fd)
+    if fd.dir then return true end
+    return self.fs.close(fd.fd)
   end
 
   local fs_mt = { __index = _node }
