@@ -26,6 +26,8 @@ do
   --  { "([ \n])else([ \n])", "%1else%2"..sys.."() " },
     { "([%);\n ])do([ \n%(])", "%1do%2"..sys.."() "},
     { "([%);\n ])repeat([ \n%(])", "%1repeat%2"..sys.."() " },
+    { "function ([a-zA-Z0-9_]+ *%([^)]*%))", "function %1"..sys.."()" },
+    { "function( *%([^)]*%))", "function %1"..sys.."()" }
   }
 
   local template = ("local %s = ...;return function(...)")
