@@ -24,10 +24,14 @@ do
   --  { "if([ %(])(.-)([ %)])then([ \n])", "if%1%2%3then%4"..sys.."() " },
   --  { "elseif([ %(])(.-)([ %)])then([ \n])", "elseif%1%2%3then%4"..sys.."() " },
   --  { "([ \n])else([ \n])", "%1else%2"..sys.."() " },
+    -- loops
     { "([%);\n ])do([ \n%(])", "%1do%2"..sys.."() "},
     { "([%);\n ])repeat([ \n%(])", "%1repeat%2"..sys.."() " },
+    -- recursive function calls
     { "function ([a-zA-Z0-9_]+ *%([^)]*%))", "function %1"..sys.."()" },
-    { "function( *%([^)]*%))", "function %1"..sys.."()" }
+    { "function( *%([^)]*%))", "function %1"..sys.."()" },
+    -- gotos
+    { "::([a-zA-Z0-9_])::", "::%1::"..sys.."()" }
   }
 
   local template = ("local %s = ...;return function(...)")
