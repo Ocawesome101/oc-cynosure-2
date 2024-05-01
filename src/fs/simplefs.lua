@@ -16,8 +16,6 @@
   along with this program.  If not, see <https://www.gnu.org/licenses/>.
 ]]--
 
---@[{error("The SimpleFS driver has not yet been updated")}]
-
 printk(k.L_INFO, "fs/simplefs")
 
 do

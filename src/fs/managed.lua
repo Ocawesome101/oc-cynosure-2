@@ -70,7 +70,8 @@ do
   end
 
   -- This is an ugly hack that will only work for about 250 years
-  -- (specifically, until 2286-11-20 at 12:46:39).
+  -- (specifically, until 2286-11-20 at 12:46:39).  I leave it up
+  -- to my successors to fix this, if anybody cares at that point.
   function _node:lastModified(file)
     local last = self.fs.lastModified(file)
 
@@ -144,34 +145,37 @@ do
     return true
   end
 
-  local function clean_path(p)
-    return (p:gsub("[/\\]+", "/"))
-  end
+  --== BEGIN OPTIONAL FILESYSTEM NODE FUNCTIONS ==--
 
-  local function check_fd(fd, fo)
-    checkArg(1, fd, "table")
-    if not (fd.path and ((not fo) or fd.fd)) then
-      checkArg(1, fd, "fd")
-    end
-  end
+  -- Takes a file path and, if that path is a symbolic link, returns
+  -- only the path to which the link points.
+  function _node:islink(path)
+    checkArg(1, path, "string")
+    if is_attribute(path) then return nil, k.errno.EACCES end
+    if not self:exists(path) then return nil, k.errno.ENOENT end
 
-  local function check_dirfd(dfd, n)
-    checkArg(n or 1, dfd, "table")
-    if not (dfd.path and dfd.dir and dfd.index) then
-      checkArg(n or 1, dfd, "dirfd")
+    local attributes = self:get_attributes(path)
+    if attributes.mode & 0xF000 == k.FS_SYMLNK then
+      return attributes.symtarget
     end
   end
 
   --== BEGIN REQUIRED FILESYSTEM NODE FUNCTIONS ==--
 
-  function _node:open_root()
-    return self:__opendir("")
+  -- Takes a file path and returns only whether that path exists.  Similar to
+  -- stat(), but faster since there's no attribute checking.
+  function _node:exists(path)
+    checkArg(1, path, "string")
+    -- this is a couple lines of code compressed into one.
+    return self.fs.exists(path)
   end
 
-  -- fstat, fstatat: Returns attributes about the given file.
-  function _node:__stat(path)
+  -- Returns attributes about the given file.
+  function _node:stat(path)
+    checkArg(1, path, "string")
+
     if is_attribute(path) then return nil, k.errno.EACCES end
-    if not self.fs.exists(path) then return nil, k.errno.ENOENT end
+    if not self:exists(path) then return nil, k.errno.ENOENT end
 
     local attributes = self:get_attributes(path)
     -- TODO: populate the 'dev' and 'rdev' fields?
@@ -195,23 +199,12 @@ do
     return stat
   end
 
-  function _node:fstat(fd)
-    check_fd(fd)
-    return self:__stat(fd.path)
-  end
+  function _node:chmod(path, mode)
+    checkArg(1, path, "string")
+    checkArg(2, mode, "number")
 
-  function _node:fstatat(dfd, name)
-    check_dirfd(dfd)
-    checkArg(2, name, "string")
-
-    local path = dfd.path.."/"..name
-    return self:__stat(path)
-  end
-
-  -- fchmod, fchmodat: Change file mode
-  function _node:__chmod(path, mode)
     if is_attribute(path) then return nil, k.errno.EACCES end
-    if not self.fs.exists(path) then return nil, k.errno.ENOENT end
+    if not self:exists(path) then return nil, k.errno.ENOENT end
 
     local attributes = self:get_attributes(path)
     -- userspace can't change the file type of a file
@@ -219,25 +212,13 @@ do
     return self:set_attributes(path, attributes)
   end
 
-  function _node:fchmod(fd, mode)
-    check_fd(fd)
-    checkArg(2, mode, "number")
+  function _node:chown(path, uid, gid)
+    checkArg(1, path, "string")
+    checkArg(2, uid, "number")
+    checkArg(3, gid, "number")
 
-    return self:__chmod(fd.path, mode)
-  end
-
-  function _node:fchmodat(dfd, name, mode)
-    check_dirfd(dfd)
-    checkArg(2, name, "string")
-    checkArg(3, mode, "number")
-
-    return self:__chmod(dfd.path.."/"..name, mode)
-  end
-
-  -- fchown, fchownat: Change file owner
-  function _node:__chown(path, uid, gid)
     if is_attribute(path) then return nil, k.errno.EACCES end
-    if not self.fs.exists(path) then return nil, k.errno.ENOENT end
+    if not self:exists(path) then return nil, k.errno.ENOENT end
 
     local attributes = self:get_attributes(path)
     attributes.uid = uid
@@ -246,29 +227,16 @@ do
     return self:set_attributes(path, attributes)
   end
 
-  function _node:fchown(fd, uid, gid)
-    check_fd(fd)
-    checkArg(2, uid, "number")
-    checkArg(3, gid, "number")
-    return self:__chown(fd.path, uid, gid)
-  end
-
-  function _node:fchownat(dfd, name, uid, gid)
-    check_dirfd(dfd)
-    checkArg(2, name, "string")
-    checkArg(3, uid, "number")
-    checkArg(4, gid, "number")
-    return self:__chown(dfd.path.."/"..name, uid, gid)
-  end
-
-  function _node:linkat()
+  function _node:link()
     -- supporting hard links on managed fs is too much work
     return nil, k.errno.ENOTSUP
   end
 
-  -- symlinkat: Create symbolic links
-  function _node:__symlink(target, linkpath)
-    if self.fs.exists(linkpath) then return nil, k.errno.EEXIST end
+  function _node:symlink(target, linkpath, mode)
+    checkArg(1, target, "string")
+    checkArg(2, linkpath, "string")
+
+    if self:exists(linkpath) then return nil, k.errno.EEXIST end
     self.fs.close(self.fs.open(linkpath, "w"))
 
     local attributes = {}
@@ -281,22 +249,11 @@ do
     return true
   end
 
-  function _node:symlinkat(tdfd, tname, ldfd, lname, mode)
-    check_dirfd(tdfd)
-    checkArg(2, tname, "string")
-    check_dirfd(ldfd, 3)
-    checkArg(4, lname, "string")
-    checkArg(5, mode, "number")
+  function _node:unlink(path)
+    checkArg(1, path, "string")
 
-    return self:__symlink(
-      tdfd.path.."/"..tname,
-      ldfd.path.."/"..lname, mode)
-  end
-
-  -- unlinkat: Unlink files
-  function _node:__unlink(path)
     if is_attribute(path) then return nil, k.errno.EACCES end
-    if not self.fs.exists(path) then return nil, k.errno.ENOENT end
+    if not self:exists(path) then return nil, k.errno.ENOENT end
 
     self.fs.remove(path)
     self.fs.remove(attr_path(path))
@@ -304,17 +261,12 @@ do
     return true
   end
 
-  function _node:unlinkat(dfd, name)
-    check_dirfd(dfd)
-    checkArg(2, name, "string")
+  function _node:mkdir(path, mode)
+    checkArg(1, path, "string")
+    checkArg(2, mode, "number")
 
-    return self:__unlink(dfd.path.."/"..name)
-  end
-
-  -- mkdirat: Create a directory
-  function _node:__mkdir(path, mode)
     local result = (not is_attribute(path)) and self.fs.makeDirectory(path)
-    if not result then return result, k.errno.ENOENT end
+    if not result then return result end
 
     local attributes = {}
     attributes.mode = (k.FS_DIR | (mode & 0xFFF))
@@ -325,35 +277,11 @@ do
     return result
   end
 
-  function _node:mkdirat(dfd, name, mode)
-    check_dirfd(dfd)
-    checkArg(2, name, "string")
-    checkArg(3, mode, "number")
+  function _node:opendir(path)
+    checkArg(1, path, "string")
 
-    return self:__mkdir(dfd.path.."/"..name, mode)
-  end
-
-  -- readlinkat: Read symbolic link
-  function _node:readlinkat(dfd, name)
-    check_dirfd(dfd)
-    checkArg(2, name, "string")
-
-    local path = dfd.path.."/"..name
-    
     if is_attribute(path) then return nil, k.errno.EACCES end
-    if not self.fs.exists(path) then return nil, k.errno.ENOENT end
-    if self.fs.isDirectory(path) then return nil, k.errno.EISDIR end
-    
-    local attributes = self:get_attributes(path)
-    if attributes.symtarget then return attributes.symtarget end
-
-    return nil, k.errno.EINVAL
-  end
-
-  -- opendirat: Open a directory
-  function _node:__opendir(path)
-    if is_attribute(path) then return nil, k.errno.EACCES end
-    if not self.fs.exists(path) then return nil, k.errno.ENOENT end
+    if not self:exists(path) then return nil, k.errno.ENOENT end
     if not self.fs.isDirectory(path) then return nil, k.errno.ENOTDIR end
 
     local files = self.fs.list(path)
@@ -361,26 +289,26 @@ do
       if is_attribute(files[i]) then table.remove(files, i) end
     end
 
-    return { path = path, dir = true, index = 0, files = files }
+    return { index = 0, files = files }
   end
 
-  function _node:opendirat(dfd, name)
-    check_dirfd(dfd)
-    checkArg(2, name, "string")
+  function _node:readdir(dirfd)
+    checkArg(1, dirfd, "table")
 
-    return self:__opendir(dfd.path.."/"..name)
-  end
+    if not (dirfd.index and dirfd.files) then
+      error("bad argument #1 to 'readdir' (expected dirfd)")
+    end
 
-  function _node:readdir(dfd)
-    check_dirfd(dfd)
-
-    dfd.index = dfd.index + 1
-    if dfd.files and dfd.files[dfd.index] then
-      return { inode = -1, name = dfd.files[dfd.index]:gsub("/", "") }
+    dirfd.index = dirfd.index + 1
+    if dirfd.files and dirfd.files[dirfd.index] then
+      return { inode = -1, name = dirfd.files[dirfd.index]:gsub("/", "") }
     end
   end
 
-  function _node:__open(path, mode, permissions)
+  function _node:open(path, mode, permissions)
+    checkArg(1, path, "string")
+    checkArg(2, mode, "string")
+
     if is_attribute(path) then return nil, k.errno.EACCES end
 
     if self.fs.isDirectory(path) then
@@ -398,48 +326,40 @@ do
         attributes.gid = k.syscalls and k.syscalls.getegid() or 0
         self:set_attributes(path, attributes)
       end
-      return {fd = fd, path = path}
+      return fd
     end
   end
 
-  function _node:openat(dfd, name, mode, permissions)
-    check_dirfd(dfd)
-    checkArg(2, name, "string")
-    checkArg(3, mode, "string")
-
-    return self:__open(dfd.path.."/"..name, mode, permissions)
-  end
-
   function _node:read(fd, count)
-    check_fd(fd, true)
+    checkArg(1, fd, "table")
     checkArg(2, count, "number")
 
-    return self.fs.read(fd.fd, count)
+    return self.fs.read(fd, count)
   end
 
   function _node:write(fd, data)
-    check_fd(fd, true)
+    checkArg(1, fd, "table")
     checkArg(2, data, "string")
 
-    return self.fs.write(fd.fd, data)
+    return self.fs.write(fd, data)
   end
 
   function _node:seek(fd, whence, offset)
-    check_fd(fd, true)
+    checkArg(1, fd, "table")
     checkArg(2, whence, "string")
     checkArg(3, offset, "number")
 
-    return self.fs.seek(fd.fd, whence, offset)
+    return self.fs.seek(fd, whence, offset)
   end
 
   -- this function does nothing
   function _node:flush() end
 
   function _node:close(fd)
-    check_fd(fd)
+    checkArg(1, fd, "table")
 
-    if fd.dir then return true end
-    return self.fs.close(fd.fd)
+    if fd.index then return true end
+    return self.fs.close(fd)
   end
 
   local fs_mt = { __index = _node }

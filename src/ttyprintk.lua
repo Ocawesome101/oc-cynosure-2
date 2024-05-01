@@ -21,9 +21,7 @@ printk(k.L_INFO, "ttyprintk")
 do
   local devfs = k.fstypes.devfs("devfs")
 
-  local drootfd = devfs:open_root()
-
-  local console, err = devfs:openat(drootfd, "/tty1", "w")
+  local console, err = devfs:open("/tty1", "w")
   if not console then
     panic("cannot open console: " .. err)
   end

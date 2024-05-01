@@ -237,7 +237,6 @@ do
   end
 
   provider.address = "procfs"
-  provider = k.wrap_fs(provider)
 
   k.register_fstype("procfs", function(x)
     return x == "procfs" and provider

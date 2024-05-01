@@ -16,8 +16,6 @@
   along with this program.  If not, see <https://www.gnu.org/licenses/>.
 ]]--
 
---#include "src/fs/wrapper.lua"
-
 printk(k.L_INFO, "fs/devfs")
 
 do
@@ -141,15 +139,19 @@ do
     return matches
   end
 
-  local function check_fd(fd, dir)
-    assert((not not fd.dir) == (not not dir),
-      "Bad argument (file descriptor expected)")
+  function provider:exists(path)
+    checkArg(1, path, "string")
+    return not not path_to_node(path)
   end
 
+  -- The following code is primarily intended to reduce the
+  -- amount of LOC, and probably memory usage.
+  --
   -- The checks for open, opendir, and ioctl are needed to
   -- work properly with the kernel's buffering implementation.
-  local fds = {}
   local function autocall(calling, pathorfd, ...)
+    checkArg(1, pathorfd, "string", "table")
+
     if type(pathorfd) == "string" then
       local device, path = path_to_node(pathorfd)
 
@@ -217,8 +219,6 @@ do
 
   provider.address = "devfs"
   provider.type = "root"
-
-  provider = k.wrap_fs(provider)
 
   k.register_fstype("devfs", function(x)
     return x == "devfs" and provider
