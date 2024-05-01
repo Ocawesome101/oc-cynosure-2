@@ -16,8 +16,6 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
   ]]--
 
---#include "src/fs/wrapper.lua"
-
 printk(k.L_INFO, "fs/managed")
 
 do
@@ -166,8 +164,12 @@ do
 
   --== BEGIN REQUIRED FILESYSTEM NODE FUNCTIONS ==--
 
-  -- stat: Returns attributes about the given file.
-  function _node:stat(path)
+  function _node:open_root()
+    return self:__opendir("")
+  end
+
+  -- fstat, fstatat: Returns attributes about the given file.
+  function _node:__stat(path)
     if is_attribute(path) then return nil, k.errno.EACCES end
     if not self.fs.exists(path) then return nil, k.errno.ENOENT end
 
@@ -193,8 +195,21 @@ do
     return stat
   end
 
-  -- chmod: Change file mode
-  function _node:chmod(path, mode)
+  function _node:fstat(fd)
+    check_fd(fd)
+    return self:__stat(fd.path)
+  end
+
+  function _node:fstatat(dfd, name)
+    check_dirfd(dfd)
+    checkArg(2, name, "string")
+
+    local path = dfd.path.."/"..name
+    return self:__stat(path)
+  end
+
+  -- fchmod, fchmodat: Change file mode
+  function _node:__chmod(path, mode)
     if is_attribute(path) then return nil, k.errno.EACCES end
     if not self.fs.exists(path) then return nil, k.errno.ENOENT end
 
@@ -204,8 +219,23 @@ do
     return self:set_attributes(path, attributes)
   end
 
-  -- chown: Change file ownership
-  function _node:chown(path, uid, gid)
+  function _node:fchmod(fd, mode)
+    check_fd(fd)
+    checkArg(2, mode, "number")
+
+    return self:__chmod(fd.path, mode)
+  end
+
+  function _node:fchmodat(dfd, name, mode)
+    check_dirfd(dfd)
+    checkArg(2, name, "string")
+    checkArg(3, mode, "number")
+
+    return self:__chmod(dfd.path.."/"..name, mode)
+  end
+
+  -- fchown, fchownat: Change file owner
+  function _node:__chown(path, uid, gid)
     if is_attribute(path) then return nil, k.errno.EACCES end
     if not self.fs.exists(path) then return nil, k.errno.ENOENT end
 
@@ -216,13 +246,28 @@ do
     return self:set_attributes(path, attributes)
   end
 
-  function _node:link()
+  function _node:fchown(fd, uid, gid)
+    check_fd(fd)
+    checkArg(2, uid, "number")
+    checkArg(3, gid, "number")
+    return self:__chown(fd.path, uid, gid)
+  end
+
+  function _node:fchownat(dfd, name, uid, gid)
+    check_dirfd(dfd)
+    checkArg(2, name, "string")
+    checkArg(3, uid, "number")
+    checkArg(4, gid, "number")
+    return self:__chown(dfd.path.."/"..name, uid, gid)
+  end
+
+  function _node:linkat()
     -- supporting hard links on managed fs is too much work
     return nil, k.errno.ENOTSUP
   end
 
-  -- symlink: Create symbolic links
-  function _node:symlink(target, linkpath)
+  -- symlinkat: Create symbolic links
+  function _node:__symlink(target, linkpath)
     if self.fs.exists(linkpath) then return nil, k.errno.EEXIST end
     self.fs.close(self.fs.open(linkpath, "w"))
 
@@ -236,8 +281,20 @@ do
     return true
   end
 
-  -- unlink: Unlink files
-  function _node:unlink(path)
+  function _node:symlinkat(tdfd, tname, ldfd, lname, mode)
+    check_dirfd(tdfd)
+    checkArg(2, tname, "string")
+    check_dirfd(ldfd, 3)
+    checkArg(4, lname, "string")
+    checkArg(5, mode, "number")
+
+    return self:__symlink(
+      tdfd.path.."/"..tname,
+      ldfd.path.."/"..lname, mode)
+  end
+
+  -- unlinkat: Unlink files
+  function _node:__unlink(path)
     if is_attribute(path) then return nil, k.errno.EACCES end
     if not self.fs.exists(path) then return nil, k.errno.ENOENT end
 
@@ -247,8 +304,15 @@ do
     return true
   end
 
-  -- mkdir: Create a directory
-  function _node:mkdir(path, mode)
+  function _node:unlinkat(dfd, name)
+    check_dirfd(dfd)
+    checkArg(2, name, "string")
+
+    return self:__unlink(dfd.path.."/"..name)
+  end
+
+  -- mkdirat: Create a directory
+  function _node:__mkdir(path, mode)
     local result = (not is_attribute(path)) and self.fs.makeDirectory(path)
     if not result then return result, k.errno.ENOENT end
 
@@ -261,10 +325,21 @@ do
     return result
   end
 
-  -- readlink: Read symbolic link
-  function _node:readlink(path)
-    checkArg(1, name, "string")
+  function _node:mkdirat(dfd, name, mode)
+    check_dirfd(dfd)
+    checkArg(2, name, "string")
+    checkArg(3, mode, "number")
 
+    return self:__mkdir(dfd.path.."/"..name, mode)
+  end
+
+  -- readlinkat: Read symbolic link
+  function _node:readlinkat(dfd, name)
+    check_dirfd(dfd)
+    checkArg(2, name, "string")
+
+    local path = dfd.path.."/"..name
+    
     if is_attribute(path) then return nil, k.errno.EACCES end
     if not self.fs.exists(path) then return nil, k.errno.ENOENT end
     if self.fs.isDirectory(path) then return nil, k.errno.EISDIR end
@@ -275,8 +350,8 @@ do
     return nil, k.errno.EINVAL
   end
 
-  -- opendir: Open a directory
-  function _node:opendir(path)
+  -- opendirat: Open a directory
+  function _node:__opendir(path)
     if is_attribute(path) then return nil, k.errno.EACCES end
     if not self.fs.exists(path) then return nil, k.errno.ENOENT end
     if not self.fs.isDirectory(path) then return nil, k.errno.ENOTDIR end
@@ -289,6 +364,13 @@ do
     return { path = path, dir = true, index = 0, files = files }
   end
 
+  function _node:opendirat(dfd, name)
+    check_dirfd(dfd)
+    checkArg(2, name, "string")
+
+    return self:__opendir(dfd.path.."/"..name)
+  end
+
   function _node:readdir(dfd)
     check_dirfd(dfd)
 
@@ -298,8 +380,7 @@ do
     end
   end
 
-  -- open/read/write/flush/close: file I/O
-  function _node:open(path, mode, permissions)
+  function _node:__open(path, mode, permissions)
     if is_attribute(path) then return nil, k.errno.EACCES end
 
     if self.fs.isDirectory(path) then
@@ -319,6 +400,14 @@ do
       end
       return {fd = fd, path = path}
     end
+  end
+
+  function _node:openat(dfd, name, mode, permissions)
+    check_dirfd(dfd)
+    checkArg(2, name, "string")
+    checkArg(3, mode, "string")
+
+    return self:__open(dfd.path.."/"..name, mode, permissions)
   end
 
   function _node:read(fd, count)
@@ -354,17 +443,16 @@ do
   end
 
   local fs_mt = { __index = _node }
-  _node.type = "managed"
 
   -- register the filesystem type with the kernel
   k.register_fstype("managed", function(comp)
     if type(comp) == "table" and comp.type == "filesystem" then
-      return k.wrap_fs(setmetatable({fs = comp,
-        address = comp.address:sub(1,8)}, fs_mt))
+      return setmetatable({fs = comp,
+        address = comp.address:sub(1,8)}, fs_mt)
 
     elseif type(comp) == "string" and component.type(comp) == "filesystem" then
-      return k.wrap_fs(setmetatable({fs = component.proxy(comp),
-        address = comp:sub(1,8)}, fs_mt))
+      return setmetatable({fs = component.proxy(comp),
+        address = comp:sub(1,8)}, fs_mt)
     end
   end)
 
