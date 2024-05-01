@@ -27,12 +27,14 @@ do
 
     local fds = {}
     local function check_fd(fd, dir)
+      assert(fds[fd], "Bad argument (bad file descriptor)")
       assert(fds[fd] and (not not fd.dir) == (not not dir),
         "Bad argument (file descriptor expected)")
     end
 
     local function wrap_fd(fd, path, dir)
       local wf = {dir = dir, fd = fd, path = path}
+  
       fds[wf] = true
       return wf
     end
@@ -134,7 +136,7 @@ do
    function wrapper:opendirat(dfd, name)
       check_fd(dfd, true)
       checkArg(2, name, "string")
-  
+
       local path = dfd.path.."/"..name
       return wrap_fd(provider:opendir(path), path, true)
     end

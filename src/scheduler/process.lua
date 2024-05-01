@@ -184,7 +184,14 @@ do
   function k.create_process(pid, parent)
     parent = parent or default_parent
 
-    local root = parent.root or k.opendir("/")
+    local root = parent.root
+    if not root then
+      local err
+      root, err = k.opendir("/")
+      if not root then
+        panic("could not open rootfs: " .. err)
+      end
+    end
 
     local new = setmetatable({
       -- local event queue

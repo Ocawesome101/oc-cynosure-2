@@ -108,13 +108,17 @@ do
   end
 
   local function __opendirat(fd, target)
-    local new = construct_dirfd(fd.path.."/"..target, fd.node, fd.node:opendirat(fd.fd, target), fd)
+    local new = construct_dirfd(
+      fd.path.."/"..target, fd.node,
+      fd.node:opendirat(fd.fd, target), fd)
     new.open = new.open + 1
     fd.child = fd.child + 1
     return new
   end
 
   local function __closedir(fd)
+    if fd.refs then fd = fd.fd end
+
     fd.open = fd.open - 1
     if fd.open == 0 and fd.child == 0 then
       fd.node:close(fd.fd)
@@ -133,19 +137,26 @@ do
     return fd
   end
 
-  local function get_basedir(path)
+  local function make_dfd(fd)
+    local ret = { fd = fd, node = fd.node, dir = true, refs = 1 }
+    return ret
+  end
+
+  local function get_basedir(path, thin)
     local current = k.current_process()
     if not current.root then
       local mnt = mounts["/"]
       local new = construct_dirfd("/", mnt, mnt:open_root())
       new.parent = new
+      if not thin then return make_dfd(new) end
       return new
     end
 
     if path:sub(1,1) == "/" then
-      return current.root
+      return thin and current.root.fd or current.root
     else
-      return current.cwd
+      local f = (current.cwd or current.root)
+      return thin and f.fd or f
     end
   end
 
@@ -155,9 +166,15 @@ do
 
     local current = k.current_process()
     if type(from) == "table" then
-      lookup = __dup(from)
+      lookup = __dup(from.fd)
     else
-      lookup = __dup(get_basedir(path))
+      lookup = __dup(get_basedir(path, true))
+    end
+
+    if path == "" then path = "." end
+
+    if path == "/" then
+      return make_dfd(lookup), true, "/", lookup.node:fstatat(lookup.fd, ".")
     end
 
     local segments = k.split_path(path)
@@ -176,7 +193,7 @@ do
           stat = lookup.node:fstatat(lookup.fd, ".")
 
         elseif i == #segments then
-          return lookup, false, segments[i]
+          return make_dfd(lookup), false, segments[i]
 
         else
           return nil, k.errno.ENOENT
@@ -225,7 +242,7 @@ do
         return nil, k.errno.ENOTDIR
 
       else
-        return lookup, true, segments[i], stat
+        return make_dfd(lookup), true, segments[i], stat
       end
     end
 
@@ -368,7 +385,7 @@ do
 
     -- Casts both sides to booleans to ensure correctness when comparing
     if (not not fd.dir) ~= (not not dir) then
-      error("bad argument #1 (cannot supply dirfd where fd is required, or vice versa)", 2)
+      error("bad argument #1 (fd != dirfd)", 2)
     end
   end
 
@@ -376,10 +393,12 @@ do
     checkArg(1, file, "string")
     checkArg(2, mode, "string")
 
+    printk(k.L_DEBUG, "open -> openat(%s)", file)
     return k.openat(get_basedir(file), file, mode)
   end
 
   function k.openat(dirfd, path, mode)
+    printk(k.L_DEBUG, "openat(%s,%s)", tostring(dirfd), path)
     verify_fd(dirfd, true)
     checkArg(2, path, "string")
     checkArg(3, mode, "string")
@@ -411,7 +430,8 @@ do
     end
 
     local umask = (cur_proc().umask or 0) ~ 511
-    local fd, err = _dirfd.node:openat(_dirfd.fd, last, mode, stat.mode & umask)
+    local fd, err = _dirfd.node:openat(
+        _dirfd.fd.fd, last, mode, stat.mode & umask)
     __closedir(_dirfd)
     if not fd then return nil, err end
 
@@ -499,7 +519,7 @@ do
     __closedir(_dirfd)
     if not fd then return nil, err end
 
-    local ret = { fd = fd, node = node, dir = true, refs = 1 }
+    local ret = { fd = fd, node = _dirfd.node, dir = true, refs = 1 }
     opened[ret] = true
     return ret
   end

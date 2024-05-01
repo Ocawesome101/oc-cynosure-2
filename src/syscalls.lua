@@ -644,7 +644,7 @@ end
   -- @function getcwd
   -- @treturn string The current process's working directory
   function k.syscalls.getcwd()
-    return k.current_process().cwd
+    return k.current_process().cwd.path
   end
 
   --- Set the current process's working directory.
