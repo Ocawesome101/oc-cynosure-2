@@ -431,7 +431,7 @@ do
 
     local umask = (cur_proc().umask or 0) ~ 511
     local fd, err = _dirfd.node:openat(
-        _dirfd.fd.fd, last, mode, stat.mode & umask)
+        _dirfd.fd, last, mode, stat.mode & umask)
     __closedir(_dirfd)
     if not fd then return nil, err end
 
