@@ -461,7 +461,7 @@ do
 
     local old, oldid = dirfd.current, dirfd.cid
     dirfd.current, dirfd.cid = self:getNext(dirfd.current)
-    if not old then return end
+    if (not old) or #old.fname == 0 then return end
 
     return { inode = oldid, name = old.fname }
   end
