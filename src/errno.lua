@@ -1,6 +1,6 @@
 --[[
-    Template kernel source file
-    Copyright (C) 2022 Ocawesome101
+    Errno constants
+    Copyright (C) 2022 ULOS Developers
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -38,6 +38,7 @@ do
     ENOTTY = 25,
     ENOSYS = 38,
     ENOTEMPTY = 39,
+    ELOOP = 40,
     EUNATCH = 49,
     ELIBEXEC = 83,
     ENOPROTOOPT = 92,

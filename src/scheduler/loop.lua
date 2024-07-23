@@ -1,6 +1,6 @@
 --[[
     Simple scheduler main loop
-    Copyright (C) 2022 Ocawesome101
+    Copyright (C) 2022 ULOS Developers
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -96,7 +96,7 @@ do
       end
 
       local signal = default
-      if deadline == -1 then
+      if deadline < 0 then
         if computer.uptime() - last_yield > 4 then
           last_yield = computer.uptime()
           signal = table.pack(k.pullSignal(0))
@@ -110,6 +110,7 @@ do
       for cpid, process in pairs(processes) do
         if not process.is_dead then
           current = cpid
+          local stop = process.stopped
 
           if computer.uptime() >= process:deadline() or #signal > 0 then
             process:resume(table.unpack(signal, 1, signal.n))
@@ -125,7 +126,19 @@ do
               for id in pairs(process.handlers) do
                 k.remove_signal_handler(id)
               end
+
+              if cpid > 1 then
+                -- queue event to parent
+                table.insert(processes[process.ppid].queue, {"proc_dead", cpid})
+              else
+                processes[cpid] = nil
+              end
             end
+          end
+
+          if stop ~= process.stopped and cpid > 1 then
+            -- queue event to parent
+            table.insert(processes[process.ppid].queue, {"proc_stopped", cpid})
           end
 
         else
@@ -149,8 +162,9 @@ do
     return pid
   end
 
+  local default_proc = { uid = 0, gid = 0, euid = 0, egid = 0 }
   function k.current_process()
-    return processes[current]
+    return processes[current] or default_proc
   end
 
   function k.get_process(rpid)

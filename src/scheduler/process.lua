@@ -1,6 +1,6 @@
 --[[
     Main process implementation
-    Copyright (C) 2022 Ocawesome101
+    Copyright (C) 2022 ULOS Developers
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -97,7 +97,7 @@ do
     sig = table.pack(sig, ...)
 
     local resumed = false
-    if sig and sig.n > 0 and #self.queue < 256 then
+    if sig and #sig > 0 and #self.queue < 256 then
       self.queue[#self.queue + 1] = sig
     end
 

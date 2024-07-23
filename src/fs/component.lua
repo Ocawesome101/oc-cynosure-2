@@ -1,6 +1,6 @@
 --[[
   Component pseudo-filesystem
-  Copyright (C) 2022 Ocawesome101
+  Copyright (C) 2022 ULOS Developers
 
   This program is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -57,7 +57,7 @@ do
     local ctype, caddr = table.unpack(k.split_path(path))
     if (not caddr) and component.list(ctype, true)() or not ctype then
       return {
-        dev=-1, ino=-1, mode=0x41A4, nlink=1, uid=0, gid=0,
+        dev=-1, ino=-1, mode=0x41ED, nlink=1, uid=0, gid=0,
         rdev=-1, size=0, blksize=2048, mtime=0, atime=0, ctime=0,
       }
     end

@@ -1,6 +1,6 @@
 --[[
   TTY line discipline
-  Copyright (C) 2022 Ocawesome101
+  Copyright (C) 2022 ULOS Developers
 
   This program is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -106,6 +106,7 @@ do
   end
 
   -- process new input from the stream - this is keyboard input
+  -- called internally by tty event handlers
   function discipline:processInput(inp)
     self:flush()
     for c in inp:gmatch(".") do
@@ -294,6 +295,7 @@ do
   end
 
   function discipline:flush()
+    if #self.wbuf == 0 then return end
     local data = self.wbuf
     self.wbuf = ""
     self.obj:write(data)

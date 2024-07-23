@@ -1,6 +1,6 @@
 --[[
     Kernel command line parsing.
-    Copyright (C) 2021 Ocawesome101
+    Copyright (C) 2021 ULOS Developers
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by

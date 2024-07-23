@@ -1,6 +1,6 @@
 --[[
   EEPROM block device support
-  Copyright (C) 2022 Ocawesome101, Atirut-W
+  Copyright (C) 2022 ULOS Developers
 
   This program is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by

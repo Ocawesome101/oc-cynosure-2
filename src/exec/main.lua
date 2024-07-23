@@ -1,6 +1,6 @@
 --[[
     Executable loading
-    Copyright (C) 2022 Ocawesome101
+    Copyright (C) 2022 ULOS Developers
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -38,11 +38,6 @@ do
     return true
   end
 
-  local default_proc = { uid = 0, euid = 0, gid = 0, egid = 0 }
-  local function cur_proc()
-    return k.current_process() or default_proc
-  end
-
   function k.load_executable(path, env)
     checkArg(1, path, "string")
     checkArg(2, env, "table")
@@ -50,7 +45,7 @@ do
     local stat, err = k.stat(path)
     if not stat then return nil, err end
 
-    if not k.process_has_permission(cur_proc(), stat, "x") then
+    if not k.process_has_permission(k.current_process(), stat, "x") then
       return nil, k.errno.EACCES
     end
 

@@ -1,6 +1,6 @@
 --[[
     Provides core system calls
-    Copyright (C) 2022 Ocawesome101
+    Copyright (C) 2022 ULOS Developers
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -407,6 +407,13 @@ end
   -- @tparam string dest The location of the new link
   k.syscalls.link = k.link
 
+  --- Create a symbolic link.
+  -- Presently only supported by managed filesystems.
+  -- @function symlink
+  -- @tparam string target The link target
+  -- @tparam string linkpath The path to the new link
+  k.syscalls.symlink = k.symlink
+
   --- Remove a link.
   -- Removes the file when its link count reaches 0.
   -- @function unlink
@@ -565,16 +572,16 @@ end
       return nil, k.errno.ECHILD
     end
 
-    local proc = k.get_process(pid)
-    repeat
-      if proc.stopped and untraced then
-        return "stopped", proc.status
-      end
-
-      if not nohang then coroutine.yield(0) end
-    until proc.is_dead or nohang
-
     local process = k.get_process(pid)
+    if not ((process.stopped and untraced) or nohang or process.is_dead) then
+      repeat
+        local sig, id = coroutine.yield()
+      until ((sig == "proc_stopped" and untraced) or sig == "proc_dead") and id == pid
+    end
+    if process.stopped and untraced then
+      return "stopped", proc.status
+    end
+
     local reason, status = process.reason, process.status or 0
 
     if k.cmdline.log_process_deaths then
@@ -607,7 +614,11 @@ end
         end
       end
 
-      if block then coroutine.yield(0.5) end
+      if block then
+        repeat
+          local sig = coroutine.yield()
+        until sig == "proc_dead"
+      end
     until not block
 
     return nil

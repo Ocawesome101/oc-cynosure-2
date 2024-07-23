@@ -111,7 +111,7 @@ if args[3] == "-strip-comments" then
     :gsub(" *%-%-%[(=*)%[.-%]%1%]", "")
     :gsub("[ \n]+%-%-[^\n]*\n", "")
     :gsub("\n+", "\n")
-    :gsub("\n( +)([^/\\_ ])", "\n%2")
+    :gsub("\n( +)", "\n")
   rhand:close()
   local whand = assert(io.open(args[2], "w"))
   whand:write(data)

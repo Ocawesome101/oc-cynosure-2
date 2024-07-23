@@ -1,6 +1,6 @@
 --[[
   Support for scripts starting with #!/path/to/interpreter
-  Copyright (C) 2022 Ocawesome101
+  Copyright (C) 2022 ULOS Developers
 
   This program is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by

@@ -1,6 +1,6 @@
 --[[
   Networking bits
-  Copyright (C) 2022 Ocawesome101
+  Copyright (C) 2022 ULOS Developers
 
   This program is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -45,8 +45,8 @@ do
     return segments
   end
 
-  -- Takes a bang path and returns a file descriptor.
-  -- e.g. request("https!ulos!dev!packages!list.upl")
+  -- Takes a network path and returns a file descriptor.
+  -- e.g. request("cnet://4bef8d/ulos/dev/packages/list.upl")
   function k.request(path)
     checkArg(1, path, "string")
 
