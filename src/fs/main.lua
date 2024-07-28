@@ -173,12 +173,12 @@ do
           end
         end
 
-        printk(k.L_DEBUG, "lookup path: %s", lookup)
+        --printk(k.L_DEBUG, "lookup path: %s", lookup)
       end
 
       if i == #segments then
-        printk(k.L_DEBUG, debug.traceback("resolve_path = %s, %s, %q, %q"),
-          tostring(node), rem, not not stat, stat and (stat.mode & 0xF000 == k.FS_SYMLNK))
+        --printk(k.L_DEBUG, debug.traceback("resolve_path = %s, %s, %q, %q"),
+        --  tostring(node), rem, not not stat, stat and (stat.mode & 0xF000 == k.FS_SYMLNK))
         return node, rem, not not stat, stat and (stat.mode & 0xF000 == k.FS_SYMLNK)
       end
     end
