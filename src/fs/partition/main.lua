@@ -74,7 +74,6 @@ do
       return drive.getSectorSize() * size
     end
     sub.type = "drive"
-    sub.isProxy = true
     return sub
   end
 
@@ -83,7 +82,6 @@ do
       -- only accept 'drive' devices
       -- TODO maybe support tape drives?
       if not device.fs then return end
-      if device.fs.isProxy then return end
 
       local drive = device.fs
       local partitions = read_partitions(drive)
